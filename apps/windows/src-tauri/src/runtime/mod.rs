@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 // Path used by log banner helper
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +17,16 @@ pub struct CoreStatus {
     pub pid: Option<u32>,
     pub message: String,
     pub controller_port: Option<u16>,
+}
+
+/// Outcome of a watcher poll for a specific start generation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WatchOutcome {
+    StillRunning,
+    /// Session was stopped or replaced — the watcher should end quietly.
+    Detached,
+    /// Child exited without a stop() call (crash, port conflict, kill).
+    Exited(String),
 }
 
 pub struct CoreRuntime {
@@ -29,6 +39,10 @@ struct Inner {
     controller_port: Option<u16>,
     controller_secret: Option<String>,
     log_path: PathBuf,
+    /// Session id of the current run; bumped on start/stop/exit so stale watchers detach.
+    generation: u64,
+    /// Unexpected exit reaped by `status()` before the watcher saw it: (session id, reason).
+    pending_exit: Option<(u64, String)>,
 }
 
 impl CoreRuntime {
@@ -41,6 +55,8 @@ impl CoreRuntime {
                 controller_port: None,
                 controller_secret: None,
                 log_path,
+                generation: 0,
+                pending_exit: None,
             }),
         }
     }
@@ -145,17 +161,22 @@ impl CoreRuntime {
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_err));
 
-        let child = command.spawn().map_err(|e| {
+        let mut child = command.spawn().map_err(|e| {
             format!(
                 "failed to spawn mihomo ({}): {e}",
                 mihomo_bin.display()
             )
         })?;
 
+        // A bad runtime.yaml or port conflict makes mihomo exit within
+        // milliseconds — catch that here instead of reporting a dead "success".
+        verify_spawn_liveness(&mut child)?;
+
         let pid = child.id();
         guard.child = Some(child);
         guard.controller_port = Some(options.controller_port);
         guard.controller_secret = options.controller_secret.clone();
+        guard.generation += 1;
         Ok(CoreStatus {
             running: true,
             pid: Some(pid),
@@ -167,6 +188,43 @@ impl CoreRuntime {
         })
     }
 
+    /// Generation of the current session; pass to `watch_poll` so a watcher
+    /// spawned for one start never acts on a later session.
+    pub fn generation(&self) -> u64 {
+        self.inner.lock().generation
+    }
+
+    /// One watcher poll step for the session identified by `generation`.
+    pub fn watch_poll(&self, generation: u64) -> WatchOutcome {
+        let mut guard = self.inner.lock();
+        // status()/reap may have observed the exit first; hand it to the watcher.
+        if let Some((gen, reason)) = guard.pending_exit.take() {
+            if gen == generation {
+                return WatchOutcome::Exited(reason);
+            }
+            if gen > generation {
+                // Belongs to a newer session; put it back for that watcher.
+                guard.pending_exit = Some((gen, reason));
+            }
+        }
+        if guard.generation != generation {
+            return WatchOutcome::Detached;
+        }
+        let Some(child) = guard.child.as_mut() else {
+            return WatchOutcome::Detached;
+        };
+        let exit = match child.try_wait() {
+            Ok(None) => return WatchOutcome::StillRunning,
+            Ok(Some(status)) => format!("Mihomo exited unexpectedly ({status})"),
+            Err(err) => format!("Mihomo state check failed: {err}"),
+        };
+        guard.child = None;
+        guard.controller_port = None;
+        guard.controller_secret = None;
+        guard.generation += 1;
+        WatchOutcome::Exited(exit)
+    }
+
     pub fn stop(&self) -> Result<CoreStatus, String> {
         let mut guard = self.inner.lock();
         self.reap_if_exited(&mut guard);
@@ -176,6 +234,9 @@ impl CoreRuntime {
         }
         guard.controller_port = None;
         guard.controller_secret = None;
+        guard.generation += 1;
+        // Deliberate stop supersedes any exit observed moments earlier.
+        guard.pending_exit = None;
         Ok(CoreStatus {
             running: false,
             pid: None,
@@ -187,20 +248,49 @@ impl CoreRuntime {
     fn reap_if_exited(&self, guard: &mut Inner) {
         if let Some(child) = guard.child.as_mut() {
             match child.try_wait() {
-                Ok(Some(_)) => {
-                    guard.child = None;
-                    guard.controller_port = None;
-                    guard.controller_secret = None;
-                }
                 Ok(None) => {}
-                Err(_) => {
-                    guard.child = None;
-                    guard.controller_port = None;
-                    guard.controller_secret = None;
+                Ok(Some(status)) => {
+                    let gen = guard.generation;
+                    guard.pending_exit = Some((gen, format!("Mihomo exited unexpectedly ({status})")));
+                    Self::clear_session(guard);
+                }
+                Err(err) => {
+                    let gen = guard.generation;
+                    guard.pending_exit = Some((gen, format!("Mihomo state check failed: {err}")));
+                    Self::clear_session(guard);
                 }
             }
         }
     }
+
+    fn clear_session(guard: &mut Inner) {
+        guard.child = None;
+        guard.controller_port = None;
+        guard.controller_secret = None;
+        guard.generation += 1;
+    }
+}
+
+/// Poll `try_wait` briefly after spawn; reject an instant exit as a start failure.
+fn verify_spawn_liveness(child: &mut Child) -> Result<(), String> {
+    const CHECKS: u32 = 8;
+    const INTERVAL: Duration = Duration::from_millis(50);
+    for _ in 0..CHECKS {
+        match child.try_wait() {
+            Ok(None) => std::thread::sleep(INTERVAL),
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "Mihomo exited immediately after start ({status}); check runtime.yaml and port usage in the kernel log"
+                ));
+            }
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Mihomo liveness check failed: {err}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn io_err(err: io::Error) -> String {
@@ -228,3 +318,38 @@ fn chrono_like_stamp() -> String {
 }
 
 pub type SharedCore = Arc<CoreRuntime>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[cfg(unix)]
+    #[test]
+    fn liveness_rejects_instant_exit() {
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 3"])
+            .spawn()
+            .expect("spawn sh");
+        let err = verify_spawn_liveness(&mut child).expect_err("instant exit must fail");
+        assert!(err.contains("exited immediately"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn liveness_accepts_surviving_process() {
+        let mut child = Command::new("sleep").arg("5").spawn().expect("spawn sleep");
+        assert!(verify_spawn_liveness(&mut child).is_ok());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn watch_poll_detaches_for_stale_generation() {
+        let core = CoreRuntime::new(std::env::temp_dir().join("viasix-runtime-test"));
+        // No session started: generation 0 with no child must detach, not exit.
+        assert_eq!(core.watch_poll(core.generation()), WatchOutcome::Detached);
+        // A generation from a superseded session also detaches quietly.
+        assert_eq!(core.watch_poll(u64::MAX), WatchOutcome::Detached);
+    }
+}

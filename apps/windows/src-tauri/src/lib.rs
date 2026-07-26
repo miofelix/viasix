@@ -22,9 +22,10 @@ use parking_lot::Mutex;
 use prefs::{PrefsStore, SessionPrefs};
 use profile::ProfileSummary;
 use projection::{ProjectOptions, RoutingMode, TunOptions};
-use runtime::{CoreRuntime, CoreStatus, SharedCore};
+use runtime::{CoreRuntime, CoreStatus, SharedCore, WatchOutcome};
 use speed_test::{IpPreset, SpeedTestRequest, SpeedTestResponse, SpeedTestSession};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use system_proxy::{ProxyEndpoint, SystemProxyManager, SystemProxyStatus};
 use traffic::{TrafficSampler, TrafficSnapshot};
@@ -56,6 +57,7 @@ struct AppServices {
     speed_test: SpeedTestSession,
     default_mixed_port: u16,
     data_dir: PathBuf,
+    shutting_down: AtomicBool,
 }
 
 type SharedServices = Arc<AppServices>;
@@ -241,9 +243,46 @@ fn core_status(services: State<'_, SharedServices>) -> CoreStatus {
 }
 
 #[tauri::command]
-fn start_core(
+async fn start_core(
     app: AppHandle,
     services: State<'_, SharedServices>,
+    profile_yaml: String,
+    selected_address: Option<String>,
+    routing_mode: String,
+    enable_system_proxy: Option<bool>,
+    mixed_port: Option<u16>,
+    controller_port: Option<u16>,
+    tun_stack: Option<String>,
+    tun_mtu: Option<u16>,
+    udp_enabled: Option<bool>,
+    sniffing_enabled: Option<bool>,
+) -> Result<CoreStatus, String> {
+    // Registry/file I/O + process spawn are blocking — keep them off the main thread.
+    let services = services.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        start_core_blocking(
+            app,
+            services,
+            profile_yaml,
+            selected_address,
+            routing_mode,
+            enable_system_proxy,
+            mixed_port,
+            controller_port,
+            tun_stack,
+            tun_mtu,
+            udp_enabled,
+            sniffing_enabled,
+        )
+    })
+    .await
+    .map_err(|e| format!("start task failed: {e}"))?
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_core_blocking(
+    app: AppHandle,
+    services: SharedServices,
     profile_yaml: String,
     selected_address: Option<String>,
     routing_mode: String,
@@ -321,7 +360,7 @@ fn start_core(
         e
     })?;
     if want_tun {
-        let sidecar = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sidecar");
+        let sidecar = resolve_sidecar_dir(&app);
         stage_wintun_beside_mihomo(&bin, &sidecar).map_err(|e| {
             push_log(&services, Some(&app), "error", "network", e.clone());
             e
@@ -349,6 +388,7 @@ fn start_core(
         e
     })?;
     services.traffic.lock().reset();
+    spawn_core_exit_watcher(app.clone(), services.clone());
     if want_tun {
         status.message = format!(
             "{}; TUN/Wintun requested (admin may be required)",
@@ -398,7 +438,17 @@ fn start_core(
 }
 
 #[tauri::command]
-fn stop_core(app: AppHandle, services: State<'_, SharedServices>) -> Result<CoreStatus, String> {
+async fn stop_core(
+    app: AppHandle,
+    services: State<'_, SharedServices>,
+) -> Result<CoreStatus, String> {
+    let services = services.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || stop_core_blocking(app, services))
+        .await
+        .map_err(|e| format!("stop task failed: {e}"))?
+}
+
+fn stop_core_blocking(app: AppHandle, services: SharedServices) -> Result<CoreStatus, String> {
     let status = services.core.stop().map_err(|e| {
         push_log(&services, Some(&app), "error", "core", e.clone());
         e
@@ -424,6 +474,53 @@ fn stop_core(app: AppHandle, services: State<'_, SharedServices>) -> Result<Core
         message,
         controller_port: status.controller_port,
     })
+}
+
+/// Watch the current mihomo session; ends quietly when stop()/restart bumps
+/// the generation, otherwise cleans up after an unexpected child exit.
+/// Dedicated thread: sessions can run for hours, so don't hold a tokio
+/// blocking-pool slot.
+fn spawn_core_exit_watcher(app: AppHandle, services: SharedServices) {
+    let generation = services.core.generation();
+    std::thread::spawn(move || loop {
+        match services.core.watch_poll(generation) {
+            WatchOutcome::StillRunning => {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            WatchOutcome::Detached => return,
+            WatchOutcome::Exited(reason) => {
+                handle_unexpected_core_exit(&app, &services, reason);
+                return;
+            }
+        }
+    });
+}
+
+fn handle_unexpected_core_exit(app: &AppHandle, services: &AppServices, reason: String) {
+    services.traffic.lock().reset();
+    // Snapshot-guarded: only reverts a proxy ViaSix itself enabled.
+    let proxy_note = match services.system_proxy.disable() {
+        Ok(status) => status.message,
+        Err(err) => format!("system proxy restore failed: {err}"),
+    };
+    push_log(
+        services,
+        Some(app),
+        "error",
+        "core",
+        format!("{reason}; {proxy_note}"),
+    );
+    ingest_kernel_log_into_activity(services, Some(app), 40);
+    refresh_tray_chrome(app, false, None);
+    let _ = app.emit(
+        "core-exited",
+        CoreStatus {
+            running: false,
+            pid: None,
+            message: reason,
+            controller_port: None,
+        },
+    );
 }
 
 #[tauri::command]
@@ -492,16 +589,30 @@ async fn detect_exit_ip(
 }
 
 fn resolve_cfst(app: &AppHandle) -> Result<PathBuf, String> {
-    resolve_bundled_binary(app, "viasix-cfst").or_else(|_| {
-        let sidecar = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sidecar");
-        speed_test::resolve_cfst_binary(&sidecar)
-    })
+    resolve_bundled_binary(app, "viasix-cfst")
+        .or_else(|_| speed_test::resolve_cfst_binary(&resolve_sidecar_dir(app)))
 }
 
 #[tauri::command]
-fn run_speed_test(
+async fn run_speed_test(
     app: AppHandle,
     services: State<'_, SharedServices>,
+    request: SpeedTestRequest,
+    use_bundled_list: Option<bool>,
+) -> Result<SpeedTestResponse, String> {
+    // CFST runs for minutes — spawn_blocking keeps the UI thread free so
+    // stop_speed_test can still be delivered.
+    let services = services.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        run_speed_test_blocking(app, services, request, use_bundled_list)
+    })
+    .await
+    .map_err(|e| format!("speed test task failed: {e}"))?
+}
+
+fn run_speed_test_blocking(
+    app: AppHandle,
+    services: SharedServices,
     mut request: SpeedTestRequest,
     use_bundled_list: Option<bool>,
 ) -> Result<SpeedTestResponse, String> {
@@ -562,9 +673,34 @@ fn speed_test_running(services: State<'_, SharedServices>) -> bool {
 
 /// macOS-style current-node configuration test (CFST against selected IPv6 only).
 #[tauri::command]
-fn test_current_node(
+async fn test_current_node(
     app: AppHandle,
     services: State<'_, SharedServices>,
+    selected_address: String,
+    disable_download: Option<bool>,
+    threads: Option<u32>,
+    ping_count: Option<u32>,
+    port: Option<u16>,
+) -> Result<SpeedTestResponse, String> {
+    let services = services.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        test_current_node_blocking(
+            app,
+            services,
+            selected_address,
+            disable_download,
+            threads,
+            ping_count,
+            port,
+        )
+    })
+    .await
+    .map_err(|e| format!("node test task failed: {e}"))?
+}
+
+fn test_current_node_blocking(
+    app: AppHandle,
+    services: SharedServices,
     selected_address: String,
     disable_download: Option<bool>,
     threads: Option<u32>,
@@ -778,8 +914,13 @@ async fn sample_traffic(
         std::mem::take(&mut *guard)
     };
     let snap = sampler.sample("127.0.0.1", port, &secret).await;
-    *services.traffic.lock() = sampler;
-    refresh_tray_chrome(&app, true, Some(&snap));
+    // stop_core may have raced the await and reset the sampler/tray; re-check
+    // before writing back so a stopped core stays stopped.
+    let still_running = services.core.status().running;
+    if still_running {
+        *services.traffic.lock() = sampler;
+    }
+    refresh_tray_chrome(&app, still_running, still_running.then_some(&snap));
     Ok(snap)
 }
 
@@ -894,6 +1035,20 @@ fn resolve_mihomo_binary(app: &AppHandle) -> Result<PathBuf, String> {
     resolve_bundled_binary(app, "viasix-mihomo")
 }
 
+/// Sidecar directory holding wintun.dll and CFST. Installed builds resolve the
+/// bundled resource dir; the compile-time source tree only exists on dev machines.
+fn resolve_sidecar_dir(app: &AppHandle) -> PathBuf {
+    if let Ok(dir) = app
+        .path()
+        .resolve("sidecar", tauri::path::BaseDirectory::Resource)
+    {
+        if dir.is_dir() {
+            return dir;
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sidecar")
+}
+
 fn resolve_bundled_binary(app: &AppHandle, stem: &str) -> Result<PathBuf, String> {
     let resource_candidates = [
         format!("sidecar/{stem}"),
@@ -947,6 +1102,12 @@ fn default_data_dir(app: &AppHandle) -> PathBuf {
 }
 
 fn shutdown_services(services: &AppServices) {
+    // Runs from both the tray quit handler and RunEvent::Exit — only the first
+    // invocation may act, or the second would disable a just-restored proxy.
+    if services.shutting_down.swap(true, AtomicOrdering::SeqCst) {
+        return;
+    }
+    let _ = services.speed_test.request_cancel();
     let _ = services.core.stop();
     services.traffic.lock().reset();
     let _ = services.system_proxy.disable();
@@ -1068,7 +1229,7 @@ pub fn run() {
         .setup(|app| {
             let data = default_data_dir(app.handle());
             let work = data.join("runtime");
-            let sidecar = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sidecar");
+            let sidecar = resolve_sidecar_dir(app.handle());
             let defaults = ProjectOptions::default();
             let services = Arc::new(AppServices {
                 core: Arc::new(CoreRuntime::new(work)),
@@ -1080,6 +1241,7 @@ pub fn run() {
                 speed_test: SpeedTestSession::default(),
                 default_mixed_port: defaults.mixed_port,
                 data_dir: data,
+                shutting_down: AtomicBool::new(false),
             });
             // Recover any leftover system proxy from a previous crash.
             let recovered = services.system_proxy.disable();

@@ -34,6 +34,35 @@ pub struct SystemProxyManager {
     snapshot_path: PathBuf,
 }
 
+/// Pure decision for `disable`: what to do with the registry and the snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) enum DisableAction {
+    /// No ViaSix snapshot — ViaSix never enabled the proxy; leave the user's settings alone.
+    LeaveUntouched,
+    /// Registry still holds our applied server — restore the snapshot, then delete it.
+    RestoreAndDelete,
+    /// User changed the proxy after ViaSix enabled it — keep theirs, drop the stale snapshot.
+    DeleteSnapshotOnly,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn disable_action(
+    has_snapshot: bool,
+    cur_enabled: bool,
+    cur_server: &str,
+    applied_server: &str,
+) -> DisableAction {
+    if !has_snapshot {
+        return DisableAction::LeaveUntouched;
+    }
+    if cur_enabled && cur_server == applied_server {
+        DisableAction::RestoreAndDelete
+    } else {
+        DisableAction::DeleteSnapshotOnly
+    }
+}
+
 impl SystemProxyManager {
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
@@ -126,34 +155,29 @@ mod platform {
     }
 
     pub fn disable(snapshot_path: &Path) -> Result<(), String> {
-        if snapshot_path.is_file() {
-            let raw = fs::read_to_string(snapshot_path).map_err(|e| e.to_string())?;
-            let snapshot: Snapshot = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-            let (cur_enable, cur_server, _) = read_settings()?;
-            // Restore only if still our applied value (or proxy still enabled with our server).
-            if cur_enable != 0 && cur_server == snapshot.applied_server {
-                write_settings(
-                    snapshot.previous_enable,
-                    &snapshot.previous_server,
-                    &snapshot.previous_override,
-                )?;
-            } else if cur_enable != 0 {
-                // Different proxy is active — only clear enable if matches applied server loosely.
-                write_settings(
-                    snapshot.previous_enable,
-                    &snapshot.previous_server,
-                    &snapshot.previous_override,
-                )?;
-            }
-            let _ = fs::remove_file(snapshot_path);
-            notify_system()?;
+        // No snapshot means ViaSix never enabled the proxy — never touch the
+        // user's own settings (launch recovery / tray quit call this blindly).
+        if !snapshot_path.is_file() {
             return Ok(());
         }
-
-        // No snapshot: turn off current proxy conservatively.
-        let (_, server, bypass) = read_settings()?;
-        write_settings(0, &server, &bypass)?;
-        notify_system()?;
+        let raw = fs::read_to_string(snapshot_path).map_err(|e| e.to_string())?;
+        let snapshot: Snapshot = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let (cur_enable, cur_server, _) = read_settings()?;
+        let action = super::disable_action(
+            true,
+            cur_enable != 0,
+            &cur_server,
+            &snapshot.applied_server,
+        );
+        if action == super::DisableAction::RestoreAndDelete {
+            write_settings(
+                snapshot.previous_enable,
+                &snapshot.previous_server,
+                &snapshot.previous_override,
+            )?;
+            notify_system()?;
+        }
+        let _ = fs::remove_file(snapshot_path);
         Ok(())
     }
 
@@ -276,5 +300,32 @@ mod tests {
         let status = manager.status();
         assert!(!status.message.is_empty());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn disable_without_snapshot_leaves_user_proxy_untouched() {
+        // Crash-recovery / tray-quit call disable blindly; a user-enabled proxy
+        // must survive when ViaSix never took a snapshot.
+        let action = disable_action(false, true, "corp-proxy:8080", "");
+        assert_eq!(action, DisableAction::LeaveUntouched);
+    }
+
+    #[test]
+    fn disable_restores_only_when_our_server_is_still_applied() {
+        let action = disable_action(true, true, "127.0.0.1:11451", "127.0.0.1:11451");
+        assert_eq!(action, DisableAction::RestoreAndDelete);
+    }
+
+    #[test]
+    fn disable_keeps_user_chosen_proxy_after_switch() {
+        // User switched to another proxy after ViaSix enabled ours — keep theirs.
+        let action = disable_action(true, true, "corp-proxy:8080", "127.0.0.1:11451");
+        assert_eq!(action, DisableAction::DeleteSnapshotOnly);
+    }
+
+    #[test]
+    fn disable_drops_stale_snapshot_when_proxy_already_off() {
+        let action = disable_action(true, false, "127.0.0.1:11451", "127.0.0.1:11451");
+        assert_eq!(action, DisableAction::DeleteSnapshotOnly);
     }
 }

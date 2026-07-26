@@ -569,13 +569,15 @@ async function onSystemProxyToggle(enabled: boolean): Promise<void> {
   model.systemProxyEnabled = enabled;
   scheduleSavePrefs();
   // Independent of routingMode / TUN — apply immediately when user toggles.
-  if (model.core?.running || enabled) {
-    await applySystemProxy(enabled);
-  } else {
+  // Toggle-off always clears: the registry may still point at a dead port
+  // (backend disable is snapshot-guarded, so user-owned proxies survive).
+  if (enabled && !model.core?.running) {
     pushLog(model, "info", "proxy", "已更新系统代理偏好（启动连接时生效）");
-    toast(enabled ? "启动连接时将启用系统代理" : "已关闭系统代理偏好", "info");
+    toast("启动连接时将启用系统代理", "info");
     paint();
+    return;
   }
+  await applySystemProxy(enabled);
 }
 
 async function setVirtualNetwork(enabled: boolean): Promise<void> {
@@ -1285,6 +1287,13 @@ async function bindBackendEvents(): Promise<void> {
       stopTrafficPolling();
       paint();
       toast(event.payload.message || "已从托盘停止代理", "info");
+    });
+    await listen<CoreStatus>("core-exited", (event) => {
+      model.core = event.payload;
+      stopTrafficPolling();
+      void refreshProxyStatus().finally(() => paint());
+      pushLog(model, "error", "core", event.payload.message || "内核已意外退出");
+      toast(event.payload.message || "内核已意外退出", "error");
     });
   } catch {
     // not in tauri
