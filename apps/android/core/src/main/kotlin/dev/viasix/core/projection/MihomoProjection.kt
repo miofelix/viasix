@@ -35,6 +35,8 @@ sealed class ProjectError(message: String) : Exception(message) {
     data object Ipv6ManagedProfileRequired : ProjectError("ipv6ManagedProfileRequired")
     data object MissingTunConfiguration : ProjectError("missingTunConfiguration")
     class InvalidYaml(detail: String) : ProjectError("invalidYAML: $detail")
+    class UnsupportedProfileExtension(detail: String) :
+        ProjectError("unsupportedProfileExtension: $detail")
 
     val contractCode: String
         get() =
@@ -43,6 +45,7 @@ sealed class ProjectError(message: String) : Exception(message) {
                 Ipv6ManagedProfileRequired -> "ipv6ManagedProfileRequired"
                 MissingTunConfiguration -> "missingTunConfiguration"
                 is InvalidYaml -> "invalidYAML"
+                is UnsupportedProfileExtension -> "unsupportedProfileExtension"
             }
 }
 
@@ -99,6 +102,7 @@ object MihomoProjection {
         if (yamlText.isEmpty()) throw ProjectError.Ipv6ManagedProfileRequired
 
         val root = parseMapping(yamlText)
+        validateViaSixExtension(root)
         val selected = resolveSelected(options.selectedAddress)
         val primary = extractPrimary(root, selected).toMutableMap()
         val allowsUdp = (primary["udp"] as? Boolean) ?: true
@@ -158,18 +162,43 @@ object MihomoProjection {
         }
     }
 
+    private fun validateViaSixExtension(root: Map<String, Any?>) {
+        val raw = root["x-viasix"] ?: return
+        val mapping = raw as? Map<*, *>
+            ?: throw ProjectError.UnsupportedProfileExtension("x-viasix must be a mapping")
+        val supportedKeys = setOf("version", "primary-server")
+        val unknown = mapping.keys.map { it.toString() }.sorted().firstOrNull { it !in supportedKeys }
+        if (unknown != null) {
+            throw ProjectError.UnsupportedProfileExtension("unknown key x-viasix.$unknown")
+        }
+        val version = mapping["version"]
+        if (version !is Int || version != 1) {
+            throw ProjectError.UnsupportedProfileExtension("x-viasix.version must be 1")
+        }
+        val primaryServer = mapping["primary-server"]
+        if (primaryServer != null && primaryServer != "selected-ip") {
+            throw ProjectError.UnsupportedProfileExtension(
+                "x-viasix.primary-server only supports selected-ip",
+            )
+        }
+    }
+
     private fun resolveSelected(selected: String?): String {
         val raw = selected?.trim().orEmpty()
         if (raw.isEmpty() || !isIpv6(raw)) throw ProjectError.SelectedNodeMustBeIPv6
         return raw
     }
 
-    private fun isIpv6(value: String): Boolean =
-        try {
+    private fun isIpv6(value: String): Boolean {
+        // Hostnames never contain ':'; requiring one guarantees
+        // InetAddress parses a literal and never resolves via DNS.
+        if (!value.contains(':')) return false
+        return try {
             InetAddress.getByName(value) is Inet6Address
         } catch (_: Exception) {
             false
         }
+    }
 
     @Suppress("UNCHECKED_CAST")
     private fun extractPrimary(root: Map<String, Any?>, selected: String): Map<String, Any?> {

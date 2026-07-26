@@ -224,6 +224,8 @@ extension MihomoConfigurationError {
             "missingSelectedNodeAddress"
         case .missingInlineProxy:
             "missingInlineProxy"
+        case .unsupportedValue(let detail) where detail.hasPrefix("x-viasix"):
+            "unsupportedProfileExtension"
         default:
             String(describing: self)
         }

@@ -6,6 +6,9 @@ import java.net.InetAddress
 object Ipv6Address {
     fun isValid(value: String?): Boolean {
         val raw = normalize(value) ?: return false
+        // Hostnames never contain ':'; requiring one guarantees
+        // InetAddress parses a literal and never resolves via DNS.
+        if (!raw.contains(':')) return false
         return try {
             InetAddress.getByName(raw) is Inet6Address
         } catch (_: Exception) {

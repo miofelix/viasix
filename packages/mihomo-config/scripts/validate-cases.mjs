@@ -20,8 +20,7 @@ const ERROR_CODES = new Set([
   "selectedNodeMustBeIPv6",
   "ipv6ManagedProfileRequired",
   "missingTunConfiguration",
-  "missingSelectedNodeAddress",
-  "missingInlineProxy",
+  "unsupportedProfileExtension",
 ]);
 
 function fail(msg) {

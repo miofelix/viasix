@@ -1,0 +1,11 @@
+{
+  "id": "reject-tun-unconfigured",
+  "description": "Privileged TUN projection without an explicit TUN configuration must fail.",
+  "selectedAddress": "2606:4700::8",
+  "routingMode": "rule",
+  "projection": "privilegedTun",
+  "expect": {
+    "success": false,
+    "errorCode": "missingTunConfiguration"
+  }
+}

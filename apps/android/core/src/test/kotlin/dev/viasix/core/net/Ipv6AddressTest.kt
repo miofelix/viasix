@@ -22,6 +22,16 @@ class Ipv6AddressTest {
     }
 
     @Test
+    fun rejectsHostnamesWithoutDnsResolution() {
+        // Hostnames must never be accepted, even when they resolve to AAAA
+        // records: validation has to stay literal-only and network-free.
+        assertFalse(Ipv6Address.isValid("v6only.example.com"))
+        assertFalse(Ipv6Address.isValid("cafe.babe"))
+        assertFalse(Ipv6Address.isValid("[v6only.example.com]"))
+        assertFalse(Ipv6Address.isValid("localhost"))
+    }
+
+    @Test
     fun normalizesBracketsAndZone() {
         assertEquals("2001:db8::1", Ipv6Address.normalize("[2001:db8::1]"))
         assertEquals("fe80::1", Ipv6Address.normalize("fe80::1%wlan0"))

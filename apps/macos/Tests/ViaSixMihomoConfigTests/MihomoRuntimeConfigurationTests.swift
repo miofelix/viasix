@@ -191,6 +191,19 @@ final class MihomoRuntimeConfigurationTests: XCTestCase {
         }
     }
 
+    func testDefaultRuntimeOptionsUseContractMixedPort() throws {
+        // contracts/schemas/local-proxy.schema.json declares default 11451;
+        // Rust ProjectOptions and Android ProjectOptions already match.
+        XCTAssertEqual(MihomoRuntimeOptions().mixedPort, 11_451)
+
+        let output = try sampleServer().runtimeConfiguration(
+            options: MihomoRuntimeOptions(),
+            replacingPrimaryServerWith: "2606:4700::21"
+        )
+        let root = try MihomoYAML.mapping(from: output)
+        XCTAssertEqual(root.int("mixed-port"), 11_451)
+    }
+
     func testRuleModeBuildsManagedGroupAndPrivateBypassRules() throws {
         let output = try sampleServer().runtimeConfiguration(
             options: MihomoRuntimeOptions(

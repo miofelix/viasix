@@ -34,5 +34,6 @@ cases/<id>/
 | `selectedNodeMustBeIPv6` | 选择了非 IPv6 |
 | `ipv6ManagedProfileRequired` | 无可替换内联主代理（含 Provider-only） |
 | `missingTunConfiguration` | 特权 TUN 投影缺少 TUN 配置 |
+| `unsupportedProfileExtension` | `x-viasix` 扩展版本或键不受支持 |
 
 完整 YAML 逐字节对比不作为契约（各端序列化顺序可不同）；**语义期望**才是跨端真相。

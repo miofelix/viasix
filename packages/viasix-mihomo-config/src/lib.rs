@@ -60,6 +60,8 @@ pub enum ProjectError {
     InvalidYaml(String),
     #[error("topLevelMustBeMapping")]
     TopLevelMustBeMapping,
+    #[error("unsupportedProfileExtension: {0}")]
+    UnsupportedProfileExtension(String),
 }
 
 impl ProjectError {
@@ -70,6 +72,7 @@ impl ProjectError {
             Self::MissingTunConfiguration => "missingTunConfiguration",
             Self::InvalidYaml(_) => "invalidYAML",
             Self::TopLevelMustBeMapping => "topLevelMustBeMapping",
+            Self::UnsupportedProfileExtension(_) => "unsupportedProfileExtension",
         }
     }
 }
@@ -150,6 +153,7 @@ pub fn project_runtime(
         .ok_or(ProjectError::Ipv6ManagedProfileRequired)?;
 
     let root = parse_mapping(profile_yaml)?;
+    validate_viasix_extension(&root)?;
     let selected = resolve_selected_address(options.selected_address.as_deref())?;
     let mut proxy = extract_primary_proxy(&root, &selected)?;
     let allows_udp = proxy
@@ -304,6 +308,44 @@ fn parse_mapping(yaml: &str) -> Result<Mapping, ProjectError> {
         Value::Null => Ok(Mapping::new()),
         _ => Err(ProjectError::TopLevelMustBeMapping),
     }
+}
+
+/// Enforce the `x-viasix` contract schema (`contracts/schemas/x-viasix.schema.json`):
+/// only `version: 1` and `primary-server: selected-ip` are supported.
+fn validate_viasix_extension(root: &Mapping) -> Result<(), ProjectError> {
+    let Some(raw) = root.get(Value::from("x-viasix")) else {
+        return Ok(());
+    };
+    let Some(extension) = raw.as_mapping() else {
+        return Err(ProjectError::UnsupportedProfileExtension(
+            "x-viasix must be a mapping".into(),
+        ));
+    };
+
+    for key in extension.keys() {
+        let name = key.as_str().unwrap_or_default();
+        if !matches!(name, "version" | "primary-server") {
+            return Err(ProjectError::UnsupportedProfileExtension(format!(
+                "unknown key x-viasix.{name}"
+            )));
+        }
+    }
+
+    if extension.get(Value::from("version")).and_then(Value::as_i64) != Some(1) {
+        return Err(ProjectError::UnsupportedProfileExtension(
+            "x-viasix.version must be 1".into(),
+        ));
+    }
+
+    if let Some(primary) = extension.get(Value::from("primary-server")) {
+        if primary.as_str() != Some("selected-ip") {
+            return Err(ProjectError::UnsupportedProfileExtension(
+                "x-viasix.primary-server only supports selected-ip".into(),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn resolve_selected_address(selected: Option<&str>) -> Result<String, ProjectError> {
@@ -469,6 +511,54 @@ fn mapping<const N: usize>(entries: [(&str, Value); N]) -> Mapping {
         map.insert(Value::from(k), v);
     }
     map
+}
+
+#[cfg(test)]
+mod extension_tests {
+    use super::*;
+
+    const INLINE_PROFILE: &str = "proxies:\n  - name: edge\n    type: vless\n    server: origin.example.com\n    port: 443\n    uuid: 11111111-1111-4111-8111-111111111111\n";
+
+    fn options() -> ProjectOptions {
+        ProjectOptions {
+            selected_address: Some("2606:4700::8".into()),
+            ..ProjectOptions::default()
+        }
+    }
+
+    fn project(extension_yaml: &str) -> Result<Mapping, ProjectError> {
+        let profile = format!("{INLINE_PROFILE}{extension_yaml}");
+        project_runtime(Some(&profile), &options())
+    }
+
+    #[test]
+    fn rejects_unsupported_x_viasix_version() {
+        let err = project("x-viasix:\n  version: 2\n  primary-server: selected-ip\n")
+            .expect_err("version 2 must be rejected");
+        assert!(matches!(err, ProjectError::UnsupportedProfileExtension(_)));
+        assert_eq!(err.contract_code(), "unsupportedProfileExtension");
+    }
+
+    #[test]
+    fn rejects_unknown_x_viasix_key() {
+        let err = project("x-viasix:\n  version: 1\n  listen-port: 1080\n")
+            .expect_err("unknown key must be rejected");
+        assert!(matches!(err, ProjectError::UnsupportedProfileExtension(_)));
+    }
+
+    #[test]
+    fn rejects_unsupported_primary_server_value() {
+        let err = project("x-viasix:\n  version: 1\n  primary-server: first-proxy\n")
+            .expect_err("unsupported primary-server must be rejected");
+        assert!(matches!(err, ProjectError::UnsupportedProfileExtension(_)));
+    }
+
+    #[test]
+    fn accepts_supported_x_viasix_extension() {
+        let root = project("x-viasix:\n  version: 1\n  primary-server: selected-ip\n")
+            .expect("supported extension must project");
+        assert!(root.contains_key(Value::from("proxies")));
+    }
 }
 
 #[cfg(test)]

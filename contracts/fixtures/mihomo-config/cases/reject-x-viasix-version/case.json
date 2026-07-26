@@ -1,0 +1,11 @@
+{
+  "id": "reject-x-viasix-version",
+  "description": "Profiles declaring an unsupported x-viasix version must be rejected on every platform.",
+  "selectedAddress": "2606:4700::8",
+  "routingMode": "rule",
+  "projection": "user",
+  "expect": {
+    "success": false,
+    "errorCode": "unsupportedProfileExtension"
+  }
+}

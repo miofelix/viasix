@@ -138,7 +138,7 @@ public struct MihomoRuntimeOptions: Codable, Equatable, Sendable {
 
     public init(
         listenAddress: String = "127.0.0.1",
-        mixedPort: Int = 7_897,
+        mixedPort: Int = 11_451,
         routingMode: MihomoRoutingMode = .rule,
         logLevel: MihomoLogLevel = .warning,
         ipv6Enabled: Bool = true,
