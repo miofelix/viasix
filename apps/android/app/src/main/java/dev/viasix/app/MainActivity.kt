@@ -16,13 +16,12 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
 import dev.viasix.app.cfst.CfstInstaller
 import dev.viasix.app.cfst.CfstRunOutcome
-import dev.viasix.app.cfst.CfstRunner
 import dev.viasix.app.mihomo.ControllerClient
 import dev.viasix.app.mihomo.MihomoInstaller
 import dev.viasix.app.mihomo.TrafficSampler
@@ -50,6 +49,7 @@ import dev.viasix.app.session.RuntimeEventCursor
 import dev.viasix.app.session.RuntimeSessionKey
 import dev.viasix.app.session.SessionRuntimeStore
 import dev.viasix.app.session.SessionStartGate
+import dev.viasix.app.session.SessionViewModel
 import dev.viasix.app.session.VpnPermissionState
 import dev.viasix.app.session.VpnSessionCommands
 import dev.viasix.app.session.sessionKey
@@ -82,7 +82,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var prefsStore: SessionPrefsStore
     private lateinit var runtimeStore: SessionRuntimeStore
     private var trafficSampler = TrafficSampler()
-    private val cfstRunner = CfstRunner()
+    private lateinit var sessionViewModel: SessionViewModel
     private var lastImportedEventId: Long = 0L
     private var trafficSessionKey: RuntimeSessionKey? = null
     /** Wall clock when STARTING began; used for start-timeout reconcile. */
@@ -171,12 +171,24 @@ class MainActivity : ComponentActivity() {
                     ),
             )
 
+        sessionViewModel = ViewModelProvider(this)[SessionViewModel::class.java]
+        // Seed once on first creation; rotation keeps the retained state so an
+        // in-flight speed test, its results, logs and exit-IP all survive.
+        sessionViewModel.seedIfNeeded(initial, AppSection.parse(initialPrefs.selectedSection))
+
         setContent {
-            var state by remember { mutableStateOf(initial) }
-            var selectedSection by remember {
-                mutableStateOf(AppSection.parse(initialPrefs.selectedSection))
-            }
-            val scope = rememberCoroutineScope()
+            // Delegate to the retained ViewModel holders: every existing reader
+            // and writer of `state` / `selectedSection` now routes through state
+            // that outlives configuration changes. `scope` uses viewModelScope so
+            // launched work is cancelled only on true teardown (onCleared).
+            var state by sessionViewModel.stateHolder
+            var selectedSection by sessionViewModel.sectionHolder
+            val scope = sessionViewModel.viewModelScope
+            val cfstRunner = sessionViewModel.cfstRunner
+            // Application context for work launched in viewModelScope: it outlives
+            // the Activity, so an in-flight run that spans a rotation never pins
+            // the destroyed Activity in memory.
+            val appContext = applicationContext
 
             fun persist(
                 next: SessionUiState,
@@ -255,7 +267,7 @@ class MainActivity : ComponentActivity() {
                     try {
                         val apps =
                             withContext(Dispatchers.IO) {
-                                InstalledAppsRepository(this@MainActivity).load()
+                                InstalledAppsRepository(appContext).load()
                             }
                         logOnly {
                             it.copy(
@@ -288,7 +300,7 @@ class MainActivity : ComponentActivity() {
                     val text =
                         try {
                             withContext(Dispatchers.IO) {
-                                contentResolver.openInputStream(uri)
+                                appContext.contentResolver.openInputStream(uri)
                                     ?.bufferedReader()
                                     ?.use { it.readText() }
                                     .orEmpty()
@@ -1006,14 +1018,14 @@ class MainActivity : ComponentActivity() {
                     val outcome =
                         withContext(Dispatchers.IO) {
                             try {
-                                val install = CfstInstaller.installIfNeeded(this@MainActivity)
+                                val install = CfstInstaller.installIfNeeded(appContext)
                                 val parameters =
                                     baseParams.resolveForRun(
                                         mode = mode,
                                         bundledIpv6ListPath = install.ipv6List.absolutePath,
                                         customIpFilePath = customFile,
                                     )
-                                val work = CfstInstaller.workDir(this@MainActivity)
+                                val work = CfstInstaller.workDir(appContext)
                                 cfstRunner.run(
                                     install.binary,
                                     work,
@@ -1023,7 +1035,7 @@ class MainActivity : ComponentActivity() {
                                             applySpeedProgress(current, total, phase)
                                         }
                                     },
-                                    sslContext = this@MainActivity,
+                                    sslContext = appContext,
                                 ) to true
                             } catch (error: Exception) {
                                 CfstRunOutcome.Failed(error.message ?: "CFST 安装失败") to false
@@ -1095,8 +1107,8 @@ class MainActivity : ComponentActivity() {
                     val outcome =
                         withContext(Dispatchers.IO) {
                             try {
-                                val install = CfstInstaller.installIfNeeded(this@MainActivity)
-                                val work = CfstInstaller.workDir(this@MainActivity)
+                                val install = CfstInstaller.installIfNeeded(appContext)
+                                val work = CfstInstaller.workDir(appContext)
                                 cfstRunner.run(
                                     install.binary,
                                     work,
@@ -1106,7 +1118,7 @@ class MainActivity : ComponentActivity() {
                                             applySpeedProgress(current, total, phase)
                                         }
                                     },
-                                    sslContext = this@MainActivity,
+                                    sslContext = appContext,
                                 ) to true
                             } catch (error: Exception) {
                                 CfstRunOutcome.Failed(error.message ?: "CFST 安装失败") to false
@@ -1138,8 +1150,8 @@ class MainActivity : ComponentActivity() {
                 scope.launch {
                     val (mihomoInfo, cfstInfo) =
                         withContext(Dispatchers.IO) {
-                            MihomoInstaller.inspectInstalled(this@MainActivity) to
-                                CfstInstaller.inspectInstalled(this@MainActivity)
+                            MihomoInstaller.inspectInstalled(appContext) to
+                                CfstInstaller.inspectInstalled(appContext)
                         }
                     logOnly { current ->
                         var next =
@@ -1208,8 +1220,8 @@ class MainActivity : ComponentActivity() {
                         withContext(Dispatchers.IO) {
                             when (component) {
                                 RuntimeComponentId.MIHOMO ->
-                                    MihomoInstaller.repair(this@MainActivity)
-                                RuntimeComponentId.CFST -> CfstInstaller.repair(this@MainActivity)
+                                    MihomoInstaller.repair(appContext)
+                                RuntimeComponentId.CFST -> CfstInstaller.repair(appContext)
                             }
                         }
                     logOnly { current ->
@@ -1831,7 +1843,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        cfstRunner.requestCancel()
+        // A running CFST is intentionally NOT cancelled here: onDestroy also
+        // fires on configuration changes (rotation). SessionViewModel.onCleared
+        // cancels it on true teardown instead, so a run survives rotation.
         super.onDestroy()
     }
 

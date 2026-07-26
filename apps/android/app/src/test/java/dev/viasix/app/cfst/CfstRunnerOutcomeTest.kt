@@ -149,19 +149,39 @@ class CfstRunnerOutcomeTest {
     }
 
     @Test
-    fun activityDestroyRequestsRunnerCancellation() {
+    fun teardownCancelsRunnerFromViewModelNotOnDestroy() {
+        // A running CFST must be cancelled on true teardown, but NOT on
+        // Activity.onDestroy (which also fires on rotation) — otherwise a rotate
+        // kills an in-flight speed test. Cancellation therefore lives in
+        // SessionViewModel.onCleared, and onDestroy must not cancel.
         val activity =
             listOf(
                 File("src/main/java/dev/viasix/app/MainActivity.kt"),
                 File("app/src/main/java/dev/viasix/app/MainActivity.kt"),
             ).firstOrNull { it.isFile } ?: error("MainActivity.kt not found")
-        val source = activity.readText()
         val onDestroy =
-            source.substringAfter("override fun onDestroy()")
+            activity.readText()
+                .substringAfter("override fun onDestroy()")
                 .substringBefore("private fun currentNotificationPermissionState")
-
-        assertTrue(onDestroy.contains("cfstRunner.requestCancel()"))
+        assertFalse(
+            "onDestroy must not cancel the runner (rotation would kill the run)",
+            onDestroy.contains("requestCancel()"),
+        )
         assertTrue(onDestroy.contains("super.onDestroy()"))
+
+        val viewModel =
+            listOf(
+                File("src/main/java/dev/viasix/app/session/SessionViewModel.kt"),
+                File("app/src/main/java/dev/viasix/app/session/SessionViewModel.kt"),
+            ).firstOrNull { it.isFile } ?: error("SessionViewModel.kt not found")
+        val onCleared =
+            viewModel.readText()
+                .substringAfter("override fun onCleared()")
+                .substringBefore("}")
+        assertTrue(
+            "onCleared must cancel the retained runner on true teardown",
+            onCleared.contains("cfstRunner.requestCancel()"),
+        )
     }
 
     @Test
