@@ -6,13 +6,62 @@
 
 ## [未发布]
 
+## [android/1.0.1] - 2026-07-27
+
+Android 稳定性更新（`versionName` 1.0.1 / `versionCode` 2）。
+
+### 变更
+
+- 会话状态改由 `SessionViewModel` 跨配置变更保留，旋转屏幕或重建 Activity 不再提前取消测速任务。
+- 节点配置摘要使用记忆化解析，并收紧数值字段与 I/O 线程池边界。
+- 本机代理投影默认启用严格路由，IPv6 地址校验与共享 contracts 保持一致。
+
+### 修复
+
+- VPN 关停改为后台拆栈；关停期间只保留最新连接请求，并在清理完成后自动重启，修复快速断开再连接时请求丢失。
+- 出站数据包队列改用公平锁与条件变量，等待空间时释放锁，取消时唤醒全部等待者，避免生产者阻塞和关停卡死。
+- 拒绝 zone ID、非字面量及 IPv4-mapped IPv6 地址，避免跨端生成不一致的运行配置。
+
+### 验证
+
+- Android 14 / API 34 arm64 真机完成 STOP→START 竞态与完整 VPN 回归；TCP 443、UDP DNS 和资源回收均通过。
+
+## [macos/1.0.1] - 2026-07-27
+
+macOS 稳定性更新（`CFBundleShortVersionString` 1.0.1 / `CFBundleVersion` 2）。
+
+### 变更
+
+- 配置导入与保存错误会直接显示在连接配置界面，隐藏窗口状态下不再丢失关键反馈。
+- 明确记录已保存 IPv6 地址回退为 macOS 平台差异，并与共享投影的严格输入规则区分。
+
+### 修复
+
+- 修复受监督命令超时与进程退出同时发生时的竞态。
+- 新的运行组件操作会清理超过 24 小时的下载/安装事务目录，同时保留新目录、无关目录和符号链接。
+- 严格拒绝 IPv4-mapped IPv6 地址，并修正 Swift 格式门禁。
+
+### 验证
+
+- `make macos-check` 通过：严格格式、Release 构建及 439 个测试（1 个跳过、0 失败）。
+
+## [windows/0.1.1] - 2026-07-27
+
+Windows 首个平台独立预览版。当前安装包由 GitHub Actions 构建，尚未配置 Authenticode 签名。
+
 ### 新增
 
-- Windows：Tauri 2 壳、投影引擎、系统代理、CFST、Mihomo TUN/Wintun、NSIS CI 与会话偏好等 MVP 能力仍在独立发布前累积（见后续 `windows/*` 版本）。
+- Tauri 2 桌面壳、共享配置投影、系统代理、CFST IPv6 优选、Mihomo TUN/Wintun、会话偏好和 NSIS 安装包。
 
 ### 变更
 
 - 文档：明确 ViaSix 为 **全平台** 产品（macOS / Windows / Android / Linux）；路线图含 Linux 桌面规划；同步 `PRIVACY` / `SECURITY` / `CONTRIBUTING` 与平台说明。
+- 代理运行时操作移出 UI 线程，系统代理写入增加前置校验和回滚保护。
+
+### 修复
+
+- Mihomo 意外退出后及时清理运行状态，避免界面继续显示已连接。
+- IPv6 预检改用标准库严格解析，并拒绝 zone ID、非法字面量和 IPv4-mapped IPv6 地址。
 
 ## [android/1.0.0] - 2026-07-23
 

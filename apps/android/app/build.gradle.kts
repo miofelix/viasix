@@ -24,9 +24,9 @@ android {
         applicationId = "dev.viasix.app"
         minSdk = 26
         targetSdk = 35
-        // First formal Android release (platform-independent versioning).
-        versionCode = 1
-        versionName = "1.0.0"
+        // Platform-independent Android versioning.
+        versionCode = 2
+        versionName = "1.0.1"
     }
 
     signingConfigs {
