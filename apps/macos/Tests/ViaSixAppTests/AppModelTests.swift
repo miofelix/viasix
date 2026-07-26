@@ -817,7 +817,7 @@ final class AppModelTests: XCTestCase {
         await model.shutdown()
     }
 
-    func testMissingProxyProfileBlocksStartAndOffersSettingsRecovery() async throws {
+    func testMissingProxyProfileBlocksStartAndOffersProfilesRecovery() async throws {
         let paths = makePaths()
         defer { try? FileManager.default.removeItem(at: paths.root) }
         let store = PreferencesStore(fileURL: paths.preferences)
@@ -855,7 +855,7 @@ final class AppModelTests: XCTestCase {
 
         model.startProxy()
         XCTAssertEqual(model.state.proxyCorePhase, .stopped)
-        XCTAssertEqual(model.state.notice?.action, .openSettings)
+        XCTAssertEqual(model.state.notice?.action, .openProfiles)
         XCTAssertFalse(FileManager.default.fileExists(atPath: invocationMarkerURL.path))
         XCTAssertTrue(
             model.state.notice?.message.contains(

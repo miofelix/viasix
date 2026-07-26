@@ -207,6 +207,10 @@ struct AppState: Equatable, Sendable {
     struct TrafficState: Equatable, Sendable {
         var snapshot = TrafficSnapshot.empty
         var isMonitoring = false
+        /// Set when the monitor cannot connect (for example the controller
+        /// configuration is unreadable) so the UI can explain instead of
+        /// showing a perpetual "连接中".
+        var monitorUnavailableReason: String?
     }
 
     var launchPhase: LaunchPhase = .idle
@@ -344,6 +348,7 @@ struct AppNotice: Identifiable, Equatable, Sendable {
 
     enum Action: Equatable, Sendable {
         case openSettings
+        case openProfiles
     }
 
     let id: UUID

@@ -104,7 +104,7 @@ struct RootView: View {
             if let notice = model.state.notice {
                 NoticeView(
                     notice: notice,
-                    openSettings: { router.select(.settings) },
+                    selectSection: { router.select($0) },
                     dismiss: model.clearNotice
                 )
                 .padding(14)
@@ -162,7 +162,7 @@ struct RootView: View {
 
 private struct NoticeView: View {
     let notice: AppNotice
-    let openSettings: () -> Void
+    let selectSection: (AppSection) -> Void
     let dismiss: () -> Void
 
     var body: some View {
@@ -172,8 +172,8 @@ private struct NoticeView: View {
             Text(notice.message)
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
-            if notice.action == .openSettings {
-                Button("打开设置", action: openSettings)
+            if let (title, section) = actionPresentation {
+                Button(title) { selectSection(section) }
                     .buttonStyle(.borderless)
             }
             Button(action: dismiss) {
@@ -191,6 +191,14 @@ private struct NoticeView: View {
         )
         .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
         .frame(maxWidth: 520)
+    }
+
+    private var actionPresentation: (String, AppSection)? {
+        switch notice.action {
+        case .openSettings: ("打开设置", .settings)
+        case .openProfiles: ("打开连接配置", .profiles)
+        case nil: nil
+        }
     }
 
     private var color: Color {

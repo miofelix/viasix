@@ -5,6 +5,7 @@ import ViaSixCore
 
 struct OverviewView: View {
     @Environment(AppModel.self) private var model
+    @State private var copiedText: String?
 
     let onSelectNodes: () -> Void
     let onManageRuntime: () -> Void
@@ -31,7 +32,8 @@ struct OverviewView: View {
 
                     TrafficStatsView(
                         snapshot: model.state.traffic.snapshot,
-                        isProxyRunning: model.state.isProxyRunning
+                        isProxyRunning: model.state.isProxyRunning,
+                        monitorUnavailableReason: model.state.traffic.monitorUnavailableReason
                     )
 
                     equalHeightRow {
@@ -223,6 +225,7 @@ struct OverviewView: View {
                             !configurationTestIsRunning
                                 && model.currentConfigurationTestUnavailableReason != nil
                         )
+                        .help(model.currentConfigurationTestUnavailableReason ?? "测试当前节点")
                     }
                 )
 
@@ -233,6 +236,7 @@ struct OverviewView: View {
                     systemImage: "location.fill",
                     primary: exitPrimaryText,
                     secondary: exitSecondaryText,
+                    secondaryIsWarning: exitResultIsStale,
                     familyBadge: exitFamilyBadge,
                     copyText: model.state.exit.info?.ip,
                     trailing: {
@@ -364,6 +368,7 @@ struct OverviewView: View {
         systemImage: String,
         primary: String,
         secondary: String,
+        secondaryIsWarning: Bool = false,
         familyBadge: (String, AppTone, String)?,
         copyText: String?,
         @ViewBuilder trailing: () -> Trailing
@@ -391,7 +396,11 @@ struct OverviewView: View {
 
             Text(secondary)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(
+                    secondaryIsWarning
+                        ? AnyShapeStyle(VisualStyle.warning)
+                        : AnyShapeStyle(.secondary)
+                )
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
@@ -440,18 +449,29 @@ struct OverviewView: View {
         .contentShape(Rectangle())
     }
 
+    // Mirrors the NodesResults copy affordance: checkmark + 已复制 for ~1.5s.
     private func copyButton(_ text: String?) -> some View {
-        Button {
+        let copied = text != nil && copiedText == text
+        return Button {
             guard let text, !text.isEmpty else { return }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
+            copiedText = text
+
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(1.5))
+                if copiedText == text {
+                    copiedText = nil
+                }
+            }
         } label: {
-            Image(systemName: "doc.on.doc")
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
                 .font(.caption.weight(.semibold))
                 .frame(width: 22, height: 22)
         }
         .buttonStyle(.borderless)
-        .help("复制")
+        .help(copied ? "已复制" : "复制")
+        .accessibilityLabel(copied ? "已复制" : "复制")
     }
 
     private var proxyActionButton: some View {
@@ -537,16 +557,27 @@ struct OverviewView: View {
         if let result = currentNodeResult {
             return result.performanceSummary
         }
-        return selectedNodeIsIPv6 ? "已选择入口，可测试当前节点" : "请先选择有效 IPv6 入口"
+        guard selectedNodeIsIPv6 else { return "请先选择有效 IPv6 入口" }
+        if let reason = model.currentConfigurationTestUnavailableReason {
+            return reason
+        }
+        return "已选择入口，可测试当前节点"
     }
 
     private var exitPrimaryText: String {
         model.state.exit.info?.ip ?? (model.state.exit.isDetecting ? "检测中…" : "尚未检测")
     }
 
+    private var exitResultIsStale: Bool {
+        model.exitIPResultIsStale && model.state.exit.info != nil && !model.state.exit.isDetecting
+    }
+
     private var exitSecondaryText: String {
         if let error = model.state.exit.errorMessage, !error.isEmpty, model.state.exit.info == nil {
             return error
+        }
+        if exitResultIsStale {
+            return "结果已过期，请重新检测"
         }
         if let location = model.state.exit.info?.location, !location.isEmpty {
             return location
@@ -686,15 +717,27 @@ struct OverviewView: View {
         return model.canUseTunMode ? "当前关闭，可与系统代理独立启用" : "需要先在设置中准备 TUN 服务"
     }
 
+    // The model methods silently ignore requests in transitional core phases
+    // (.validating/.starting/.stopping), so the toggles must be disabled there
+    // too or they animate and snap back with no feedback.
+    private var proxyCoreIsTransitioning: Bool {
+        switch model.state.proxyCorePhase {
+        case .validating, .starting, .stopping: true
+        case .stopped, .running, .failed: false
+        }
+    }
+
     private var routingControlsDisabled: Bool {
-        model.isRoutingModeChanging
+        proxyCoreIsTransitioning
+            || model.isRoutingModeChanging
             || model.isNetworkAccessChanging
             || model.isTemplateOperationBusy
             || model.switchingIP != nil
     }
 
     private var networkControlsDisabled: Bool {
-        model.isNetworkAccessChanging
+        proxyCoreIsTransitioning
+            || model.isNetworkAccessChanging
             || model.isRoutingModeChanging
             || model.isTunTransitioning
             || model.isTemplateOperationBusy

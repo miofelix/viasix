@@ -1,13 +1,10 @@
 import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 import ViaSixCore
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
-    @State private var showsTemplateEditor = false
     @State private var showsLocalProxyEditor = false
-    @State private var showsServerEditor = false
     @State private var exitIPEndpointDraft = ""
     @State private var exitIPEndpointError: String?
 
@@ -297,75 +294,13 @@ struct SettingsView: View {
         }
     }
 
-    private var serverConfigurationCard: some View {
-        SurfaceCard {
-            CardHeader("服务器连接", systemImage: "server.rack", tone: serverStatusTone) {
-                StatusBadge(
-                    serverStatusTitle,
-                    tone: serverStatusTone,
-                    systemImage: serverStatusSystemImage
-                )
-            }
-            Divider()
-
-            VStack(alignment: .leading, spacing: 0) {
-                SettingRow(
-                    "连接方式",
-                    detail: "VLESS、VMess、Trojan、Shadowsocks",
-                    systemImage: "point.3.connected.trianglepath.dotted"
-                ) {
-                    Button("查看与修改", systemImage: "slider.horizontal.3") {
-                        showsServerEditor = true
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(serverEditorDisabled)
-                }
-
-                Divider()
-                    .padding(.leading, 52)
-
-                SettingRow(
-                    "YAML 配置",
-                    detail: "导入或直接编辑 Mihomo YAML",
-                    systemImage: "curlybraces.square"
-                ) {
-                    Menu {
-                        Button("编辑 Mihomo YAML", systemImage: "curlybraces.square") {
-                            showsTemplateEditor = true
-                        }
-                        .disabled(!serverConfigurationExists)
-
-                        Button("导入代理配置…", systemImage: "square.and.arrow.down") {
-                            importProxyProfile()
-                        }
-                    } label: {
-                        Label("高级", systemImage: "ellipsis.circle")
-                    }
-                    .disabled(proxyImportDisabled)
-                }
-
-                proxyConfigurationFeedback
-            }
-            .padding(.horizontal, VisualStyle.spacing16)
-            .padding(.bottom, VisualStyle.spacing12)
-        }
-        .sheet(isPresented: $showsTemplateEditor) {
-            MihomoProfileEditorView()
-                .environment(model)
-        }
-        .sheet(isPresented: $showsServerEditor) {
-            ServerConfigurationEditorView()
-                .environment(model)
-        }
-    }
-
     private var localProxyCard: some View {
         SurfaceCard {
             CardHeader("本机代理", systemImage: "laptopcomputer", tone: .accent) {
                 Button("编辑", systemImage: "slider.horizontal.3") {
                     showsLocalProxyEditor = true
                 }
-                .disabled(proxyImportDisabled)
+                .disabled(localProxyEditingDisabled)
             }
             Divider()
 
@@ -488,48 +423,6 @@ struct SettingsView: View {
         }
     }
 
-    @ViewBuilder
-    private var proxyConfigurationFeedback: some View {
-        if let templateOperationStatus {
-            Divider()
-            HStack(spacing: VisualStyle.spacing8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text(templateOperationStatus)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.vertical, VisualStyle.spacing12)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(templateOperationStatus)
-        } else if let error = model.state.templateOperationError {
-            Divider()
-            Label(error, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption)
-                .foregroundStyle(.red)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.vertical, VisualStyle.spacing12)
-        } else if let issue = model.proxyConfigurationIssue {
-            Divider()
-            Label(issue, systemImage: "exclamationmark.circle.fill")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.vertical, VisualStyle.spacing12)
-        } else if proxyImportDisabled {
-            Divider()
-            Text(proxyImportBlockedMessage)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.vertical, VisualStyle.spacing12)
-        }
-    }
-
-    private var serverConfigurationExists: Bool {
-        FileManager.default.fileExists(atPath: model.paths.profileConfig.path)
-    }
-
     private var tunServiceTone: AppTone {
         if model.state.tun.operationInProgress || model.isTunTransitioning { return .accent }
         if model.state.tun.isRunning { return .positive }
@@ -623,35 +516,6 @@ struct SettingsView: View {
             "检测到未完成清理的会话，需要恢复"
         case .failed(let detail):
             detail
-        }
-    }
-
-    private var serverEditorDisabled: Bool {
-        proxyImportDisabled
-    }
-
-    private var serverStatusTitle: String {
-        if model.state.templateOperationPhase != .idle { return "处理中" }
-        if model.state.templateOperationError != nil { return "操作失败" }
-        if !serverConfigurationExists { return "未配置" }
-        if model.proxyConfigurationIssue != nil { return "需要检查" }
-        return "可用"
-    }
-
-    private var serverStatusTone: AppTone {
-        if model.state.templateOperationPhase != .idle { return .accent }
-        if model.state.templateOperationError != nil { return .negative }
-        if !serverConfigurationExists || model.proxyConfigurationIssue != nil { return .warning }
-        return .positive
-    }
-
-    private var serverStatusSystemImage: String {
-        switch serverStatusTone {
-        case .accent: "arrow.triangle.2.circlepath"
-        case .positive: "checkmark.circle.fill"
-        case .warning: "exclamationmark.circle.fill"
-        case .negative: "xmark.circle.fill"
-        case .neutral: "circle"
         }
     }
 
@@ -960,7 +824,7 @@ struct SettingsView: View {
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 
-    private var proxyImportDisabled: Bool {
+    private var localProxyEditingDisabled: Bool {
         guard model.state.launchPhase == .ready else { return true }
         guard model.state.templateOperationPhase == .idle else { return true }
         guard model.switchingIP == nil else { return true }
@@ -970,35 +834,6 @@ struct SettingsView: View {
             true
         case .stopped, .failed:
             false
-        }
-    }
-
-    private var proxyImportBlockedMessage: String {
-        switch model.state.launchPhase {
-        case .idle, .loading:
-            return "正在加载应用数据，完成后即可导入或编辑连接配置。"
-        case .failed(let message):
-            return "应用初始化失败：\(message)"
-        case .ready:
-            break
-        }
-        if let operation = model.state.runtimeOperation {
-            return "\(operation.description)，完成后再导入或编辑连接配置。"
-        }
-        if model.switchingIP != nil {
-            return "正在应用节点，完成后再导入或编辑连接配置。"
-        }
-        return "请先停止本地代理，再导入或编辑连接配置。"
-    }
-
-    private var templateOperationStatus: String? {
-        switch model.state.templateOperationPhase {
-        case .idle:
-            nil
-        case .importing:
-            "正在导入代理配置，请稍候…"
-        case .saving:
-            "正在保存代理配置，请稍候…"
         }
     }
 
@@ -1031,22 +866,5 @@ struct SettingsView: View {
         }
         exitIPEndpointError = nil
         model.exitIPEndpoint = normalized
-    }
-
-    private func importProxyProfile() {
-        let panel = NSOpenPanel()
-        panel.title = "导入 Mihomo YAML"
-        panel.message = "选择 .yaml 或 .yml 配置文件。"
-        panel.prompt = "导入"
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [
-            UTType(filenameExtension: "yaml"),
-            UTType(filenameExtension: "yml"),
-        ].compactMap { $0 }
-        if panel.runModal() == .OK, let url = panel.url {
-            model.importProxyProfile(from: url)
-        }
     }
 }

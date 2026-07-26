@@ -19,6 +19,13 @@ struct MenuBarView: View {
         Label(transportTitle, systemImage: transportIcon)
         Label(proxyStatusTitle, systemImage: proxyStatusIcon)
 
+        if let failureMessage = proxyFailureMessage {
+            Text(failureMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+        }
+
         if let trafficSummary = MenuBarTrafficPresentation.menuSummary(
             isProxyRunning: model.state.isProxyRunning,
             snapshot: model.state.traffic.snapshot
@@ -127,6 +134,13 @@ struct MenuBarView: View {
         case .failed: "exclamationmark.triangle.fill"
         case .stopped: "circle"
         }
+    }
+
+    private var proxyFailureMessage: String? {
+        guard case .failed(let message) = model.state.proxyCorePhase, !message.isEmpty else {
+            return nil
+        }
+        return message
     }
 
     private var proxyOperationBusy: Bool {

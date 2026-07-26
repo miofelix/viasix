@@ -5,6 +5,7 @@ import ViaSixCore
 struct TrafficStatsView: View {
     let snapshot: TrafficSnapshot
     let isProxyRunning: Bool
+    var monitorUnavailableReason: String?
 
     private static let graphHeight: CGFloat = 128
     private static let metricHeight: CGFloat = 56
@@ -73,9 +74,9 @@ struct TrafficStatsView: View {
                     )
                     metricTile(
                         title: "状态",
-                        value: isProxyRunning ? (snapshot.isLive ? "实时采集" : "连接中") : "未连接",
+                        value: statusMetricValue,
                         systemImage: isProxyRunning ? "waveform.path.ecg" : "pause.circle",
-                        tone: isProxyRunning ? .positive : .neutral
+                        tone: monitorIsUnavailable ? .warning : (isProxyRunning ? .positive : .neutral)
                     )
                 }
 
@@ -90,27 +91,49 @@ struct TrafficStatsView: View {
         }
     }
 
+    private var monitorIsUnavailable: Bool {
+        isProxyRunning && monitorUnavailableReason != nil
+    }
+
+    private var statusMetricValue: String {
+        if !isProxyRunning { return "未连接" }
+        if monitorIsUnavailable { return "统计不可用" }
+        return snapshot.isLive ? "实时采集" : "连接中"
+    }
+
+    private var graphPlaceholderText: String {
+        if monitorIsUnavailable { return "流量统计不可用" }
+        return isProxyRunning ? "等待流量数据…" : "暂无流量数据"
+    }
+
     private var headerTone: AppTone {
         if !isProxyRunning { return .neutral }
+        if monitorIsUnavailable { return .warning }
         return snapshot.isLive ? .positive : .accent
     }
 
     private var statusTitle: String {
         if !isProxyRunning { return "未连接" }
+        if monitorIsUnavailable { return "不可用" }
         return snapshot.isLive ? "实时" : "连接中"
     }
 
     private var statusTone: AppTone {
         if !isProxyRunning { return .neutral }
+        if monitorIsUnavailable { return .warning }
         return snapshot.isLive ? .positive : .warning
     }
 
     private var statusIcon: String {
         if !isProxyRunning { return "circle" }
+        if monitorIsUnavailable { return "exclamationmark.triangle.fill" }
         return snapshot.isLive ? "antenna.radiowaves.left.and.right" : "hourglass"
     }
 
     private var footerText: String {
+        if monitorIsUnavailable, let monitorUnavailableReason {
+            return "流量统计不可用：\(monitorUnavailableReason)"
+        }
         if isProxyRunning {
             return "速率来自 /traffic，累计来自 /connections，内存来自 /memory"
         }
@@ -123,7 +146,7 @@ struct TrafficStatsView: View {
         if points.isEmpty {
             ZStack {
                 TrafficGraphGrid()
-                Text(isProxyRunning ? "等待流量数据…" : "暂无流量数据")
+                Text(graphPlaceholderText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -354,7 +354,9 @@ final class AppModel {
     @ObservationIgnored private var routingModeTask: Task<Void, Never>?
     @ObservationIgnored private var trafficMonitorTask: Task<Void, Never>?
     @ObservationIgnored private var trafficMonitorStopTask: Task<Void, Never>?
+    @ObservationIgnored private var trafficMonitorRetryTask: Task<Void, Never>?
     @ObservationIgnored private var trafficMonitorGeneration = 0
+    @ObservationIgnored private var trafficMonitorConfigurationRetries = 0
     @ObservationIgnored private var trafficMonitor = TrafficMonitor()
     @ObservationIgnored private var activeRunner: CfstRunner?
     @ObservationIgnored private var activeSpeedTestID: UUID?
@@ -1536,7 +1538,7 @@ final class AppModel {
         else { return }
         guard isProxyConfigurationReady else {
             let message = proxyConfigurationIssue ?? "代理配置正在检查，请稍候"
-            showNotice(message, style: .error, action: .openSettings)
+            showNotice(message, style: .error, action: .openProfiles)
             return
         }
         if effectiveNetworkAccessUsesTun {
@@ -1622,7 +1624,7 @@ final class AppModel {
                 syncTrafficMonitoring()
                 appendLog(source: .proxy, level: .error, message: error.localizedDescription)
                 let recoveryAction: AppNotice.Action? =
-                    error is MihomoConfigurationError ? .openSettings : nil
+                    error is MihomoConfigurationError ? .openProfiles : nil
                 showNotice(
                     "本地代理启动失败：\(error.localizedDescription)",
                     style: .error,
@@ -2255,7 +2257,7 @@ final class AppModel {
                 showNotice(
                     "代理配置需要重新导入或修复：\(configurationWarning)",
                     style: .error,
-                    action: .openSettings
+                    action: .openProfiles
                 )
             }
             if let systemProxyRecoveryWarning {
@@ -2669,8 +2671,13 @@ final class AppModel {
                     message: "无法读取 Controller 配置，流量统计暂不可用：\(error.localizedDescription)"
                 )
                 state.traffic.isMonitoring = false
+                state.traffic.monitorUnavailableReason = error.localizedDescription
+                scheduleTrafficMonitoringRetry(after: generation)
                 return
             }
+
+            trafficMonitorConfigurationRetries = 0
+            state.traffic.monitorUnavailableReason = nil
 
             guard trafficMonitorGeneration == generation,
                 !Task.isCancelled,
@@ -2704,12 +2711,43 @@ final class AppModel {
         }
     }
 
+    /// Bounded retry after a controller-configuration read failure so a
+    /// transient error does not leave traffic statistics dead until the next
+    /// proxy restart.
+    private static let trafficMonitorConfigurationRetryLimit = 3
+    private static let trafficMonitorConfigurationRetryDelay = Duration.seconds(3)
+
+    private func scheduleTrafficMonitoringRetry(after generation: Int) {
+        guard trafficMonitorConfigurationRetries < Self.trafficMonitorConfigurationRetryLimit
+        else { return }
+        trafficMonitorConfigurationRetries += 1
+        trafficMonitorRetryTask?.cancel()
+        trafficMonitorRetryTask = Task { [weak self] in
+            guard let self else { return }
+            defer { trafficMonitorRetryTask = nil }
+            do {
+                try await Task.sleep(for: Self.trafficMonitorConfigurationRetryDelay)
+            } catch {
+                return
+            }
+            guard trafficMonitorGeneration == generation,
+                !isShuttingDown,
+                state.isProxyRunning
+            else { return }
+            startTrafficMonitoring()
+        }
+    }
+
     private func stopTrafficMonitoring() {
         trafficMonitorGeneration += 1
+        trafficMonitorRetryTask?.cancel()
+        trafficMonitorRetryTask = nil
+        trafficMonitorConfigurationRetries = 0
         trafficMonitorTask?.cancel()
         trafficMonitorTask = nil
         state.traffic.isMonitoring = false
         state.traffic.snapshot = .empty
+        state.traffic.monitorUnavailableReason = nil
         let stopTask = Task { [trafficMonitor] in
             await trafficMonitor.stop()
         }
