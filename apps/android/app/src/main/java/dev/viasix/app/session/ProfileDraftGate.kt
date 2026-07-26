@@ -1,7 +1,5 @@
 package dev.viasix.app.session
 
-import dev.viasix.core.profile.ProfileSummaryParser
-
 /**
  * Fast, pure validation for the editable profile draft.
  * Full projection validation still runs before the draft is applied.
@@ -16,7 +14,8 @@ object ProfileDraftGate {
     fun evaluate(profileYaml: String): Result {
         if (profileYaml.isBlank()) return Result.Blocked("配置草稿为空")
 
-        val summary = ProfileSummaryParser.parse(profileYaml)
+        // Memoized: evaluated per keystroke via SessionUiState.profileDraftIssue.
+        val summary = MemoizedProfileSummaryParser.shared.summaryFor(profileYaml)
         summary.warnings.firstOrNull {
             it.startsWith("YAML 解析失败") || it.startsWith("顶层必须")
         }?.let { return Result.Blocked(it) }

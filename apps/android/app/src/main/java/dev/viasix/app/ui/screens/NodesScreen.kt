@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
@@ -31,9 +32,14 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import dev.viasix.app.runtime.RuntimeComponentId
 import dev.viasix.app.state.SessionUiState
@@ -685,15 +691,16 @@ private fun IntField(
     enabled: Boolean,
     onValue: (Int) -> Unit,
 ) {
-    OutlinedTextField(
-        value = value.toString(),
-        onValueChange = { raw ->
-            raw.filter { it.isDigit() }.toIntOrNull()?.let(onValue)
-        },
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text(label) },
+    NumericField(
+        label = label,
+        value = value,
         enabled = enabled,
-        singleLine = true,
+        format = Int::toString,
+        // Digits-only keeps the previous non-negative semantics (no "-"/"+").
+        parse = { raw -> raw.takeIf { it.isNotEmpty() && it.all(Char::isDigit) }?.toIntOrNull() },
+        keyboardType = KeyboardType.Number,
+        errorText = "请输入整数",
+        onValue = onValue,
     )
 }
 
@@ -704,20 +711,60 @@ private fun DoubleField(
     enabled: Boolean,
     onValue: (Double) -> Unit,
 ) {
-    OutlinedTextField(
-        value =
-            if (value == value.toLong().toDouble()) {
-                value.toLong().toString()
+    NumericField(
+        label = label,
+        value = value,
+        enabled = enabled,
+        format = { v ->
+            if (v == v.toLong().toDouble()) {
+                v.toLong().toString()
             } else {
-                value.toString()
-            },
+                v.toString()
+            }
+        },
+        parse = String::toDoubleOrNull,
+        keyboardType = KeyboardType.Decimal,
+        errorText = "请输入数字",
+        onValue = onValue,
+    )
+}
+
+/** Text + last value committed upward; raw is kept as typed until it parses. */
+private data class NumericFieldText<T>(val raw: String, val committed: T)
+
+@Composable
+private fun <T : Any> NumericField(
+    label: String,
+    value: T,
+    enabled: Boolean,
+    format: (T) -> String,
+    parse: (String) -> T?,
+    keyboardType: KeyboardType,
+    errorText: String,
+    onValue: (T) -> Unit,
+) {
+    // Raw text is local so intermediate edits (empty field, "0.") never snap
+    // back to the committed value mid-typing; only valid parses commit upward.
+    var field by remember { mutableStateOf(NumericFieldText(format(value), value)) }
+    if (field.committed != value) {
+        // External change (恢复默认测速设置 / preset): re-sync the visible text.
+        field = NumericFieldText(format(value), value)
+    }
+    val parseFailed = parse(field.raw) == null
+    OutlinedTextField(
+        value = field.raw,
         onValueChange = { raw ->
-            raw.toDoubleOrNull()?.let(onValue)
+            val parsed = parse(raw)
+            field = NumericFieldText(raw, parsed ?: field.committed)
+            parsed?.let(onValue)
         },
         modifier = Modifier.fillMaxWidth(),
         label = { Text(label) },
         enabled = enabled,
         singleLine = true,
+        isError = parseFailed,
+        supportingText = if (parseFailed) ({ Text(errorText) }) else null,
+        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
     )
 }
 

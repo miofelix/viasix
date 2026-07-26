@@ -44,7 +44,10 @@ class Tun2SocksEngine(
     private val maxUdpClients: Int = 256,
     maxDirectDnsQueries: Int = 32,
     maxConnectionWorkers: Int = 16,
-    maxIoWorkers: Int = 64,
+    // Downstream readers hold one io thread per live TCP session, so the pool
+    // must cover maxSessions (admission control) plus transient upstream
+    // writers; a smaller pool RSTs healthy sessions mid-connection.
+    maxIoWorkers: Int = maxSessions + 64,
     private val associateFailBackoffMs: Long = 5_000L,
 ) {
     private val running = AtomicBoolean(false)

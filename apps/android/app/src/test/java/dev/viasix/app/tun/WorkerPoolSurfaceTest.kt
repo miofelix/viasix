@@ -16,7 +16,9 @@ class WorkerPoolSurfaceTest {
 
         assertFalse(engine.contains("newCachedThreadPool"))
         assertTrue(engine.contains("maxConnectionWorkers: Int = 16"))
-        assertTrue(engine.contains("maxIoWorkers: Int = 64"))
+        // Io pool must cover the session admission limit: readers pin one
+        // thread per live TCP session, writers need transient headroom.
+        assertTrue(engine.contains("maxIoWorkers: Int = maxSessions + 64"))
         assertTrue(engine.contains("connectionWorkers.execute { openTcpSession(key, session) }"))
         assertTrue(engine.contains("ioWorkers.execute { writeTcpUpstream(key, session, socket) }"))
         assertTrue(engine.contains("Socks5Client.connectWithSocket"))

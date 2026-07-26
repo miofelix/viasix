@@ -133,18 +133,12 @@ class MainActivity : ComponentActivity() {
     private val openDocument =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri == null) return@registerForActivityResult
-            try {
-                val text =
-                    contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-                        .orEmpty()
-                if (text.isNotBlank()) {
-                    profileImportHandler?.invoke(text)
-                }
-            } catch (_: Exception) {
-            }
+            // Reading (cloud providers can be slow or fail) happens on Dispatchers.IO
+            // inside the compose scope; failures surface like clipboard import does.
+            profileImportUriHandler?.invoke(uri)
         }
 
-    private var profileImportHandler: ((String) -> Unit)? = null
+    private var profileImportUriHandler: ((Uri) -> Unit)? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -289,16 +283,50 @@ class MainActivity : ComponentActivity() {
                 refreshInstalledApps()
             }
 
-            profileImportHandler = { yaml ->
-                update {
-                    it.copy(profileDraft = yaml, configPreview = "")
-                        .appendLog(
-                            "已导入配置草稿（${yaml.length} 字符），校验后请应用",
-                            LogLevel.Success,
-                            LogSource.Proxy,
-                        )
+            fun importProfileFromUri(uri: Uri) {
+                scope.launch {
+                    val text =
+                        try {
+                            withContext(Dispatchers.IO) {
+                                contentResolver.openInputStream(uri)
+                                    ?.bufferedReader()
+                                    ?.use { it.readText() }
+                                    .orEmpty()
+                            }
+                        } catch (error: Exception) {
+                            update {
+                                it.appendLog(
+                                    "读取配置文件失败：${error.message ?: "文件不可访问"}",
+                                    LogLevel.Warning,
+                                    LogSource.Proxy,
+                                    asNotice = true,
+                                )
+                            }
+                            return@launch
+                        }
+                    if (text.isBlank()) {
+                        update {
+                            it.appendLog(
+                                "所选文件为空，未导入配置",
+                                LogLevel.Warning,
+                                LogSource.Proxy,
+                                asNotice = true,
+                            )
+                        }
+                        return@launch
+                    }
+                    update {
+                        it.copy(profileDraft = text, configPreview = "")
+                            .appendLog(
+                                "已导入配置草稿（${text.length} 字符），校验后请应用",
+                                LogLevel.Success,
+                                LogSource.Proxy,
+                            )
+                    }
                 }
             }
+
+            profileImportUriHandler = ::importProfileFromUri
 
             LaunchedEffect(Unit) {
                 while (true) {
@@ -1755,6 +1783,15 @@ class MainActivity : ComponentActivity() {
                                             isLoadingApps = false,
                                         ),
                                     runtimeComponents = state.runtimeComponents,
+                                    // No re-inspection after reset: reuse the retained CFST
+                                    // check so the placeholder message never sticks.
+                                    speedTest =
+                                        SessionUiState.fromPrefs(resetPrefs).speedTest.copy(
+                                            binaryReady = state.runtimeComponents.cfst.ready,
+                                            message =
+                                                state.runtimeComponents.cfst.detail
+                                                    .ifBlank { "正在检查 CFST 组件…" },
+                                        ),
                                     runtime = currentRuntime.toUiSnapshot(),
                                     connectionPhase =
                                         ConnectionPhase.restore(currentRuntime.phase),

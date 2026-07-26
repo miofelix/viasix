@@ -15,13 +15,13 @@ import dev.viasix.app.session.DnsRoutingMode
 import dev.viasix.app.session.DnsSettingsPolicy
 import dev.viasix.app.session.DnsSettingsState
 import dev.viasix.app.session.Ipv6RoutingMode
+import dev.viasix.app.session.MemoizedProfileSummaryParser
 import dev.viasix.app.session.NotificationPermissionState
 import dev.viasix.app.session.ProfileDraftGate
 import dev.viasix.app.session.VpnMtuPolicy
 import dev.viasix.app.session.VpnPermissionState
 import dev.viasix.core.net.Ipv6Address
 import dev.viasix.core.profile.ProfileSummary
-import dev.viasix.core.profile.ProfileSummaryParser
 import dev.viasix.core.projection.RoutingMode
 import dev.viasix.core.speedtest.IPSourceMode
 import dev.viasix.core.speedtest.NodeResultSorting
@@ -90,7 +90,8 @@ data class SpeedTestUiState(
     val isRunning: Boolean = false,
     /** True while a single-IP “当前节点测速” run is active. */
     val isNodeTest: Boolean = false,
-    val message: String = "需要先执行 node scripts/fetch-cfst.mjs 下载 CFST（arm64）",
+    /** Placeholder until the async component inspection overwrites it with CFST detail. */
+    val message: String = "正在检查 CFST 组件…",
     val results: List<SpeedTestResult> = emptyList(),
     /** Live CFST bar progress (macOS speedTest.current / total). 0 total = unknown. */
     val progressCurrent: Int = 0,
@@ -171,11 +172,13 @@ data class SessionUiState(
     val configPreview: String = "",
     val notice: AppNotice? = null,
 ) {
+    // Memoized: getters run per recomposition and per 1.2s status poll; repeat
+    // parses of an unchanged YAML string must not hit SnakeYAML on the main thread.
     val profileSummary: ProfileSummary
-        get() = ProfileSummaryParser.parse(profileYaml)
+        get() = MemoizedProfileSummaryParser.shared.summaryFor(profileYaml)
 
     val profileDraftSummary: ProfileSummary
-        get() = ProfileSummaryParser.parse(profileDraft)
+        get() = MemoizedProfileSummaryParser.shared.summaryFor(profileDraft)
 
     val profileHasUnsavedChanges: Boolean
         get() = profileDraft != profileYaml
