@@ -256,7 +256,8 @@ public struct MihomoServerConfiguration: Equatable, Sendable {
         // followed by 0xff 0xff. These embed an IPv4 endpoint rather than a real
         // IPv6 exit, so the contract rejects them on every platform.
         let bytes = withUnsafeBytes(of: &address) { Array($0) }
-        let isV4Mapped = bytes.count == 16
+        let isV4Mapped =
+            bytes.count == 16
             && bytes[0..<10].allSatisfy { $0 == 0 }
             && bytes[10] == 0xff
             && bytes[11] == 0xff

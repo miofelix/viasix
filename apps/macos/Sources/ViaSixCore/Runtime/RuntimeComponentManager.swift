@@ -731,9 +731,7 @@ public actor RuntimeComponentManager {
         else { return }
 
         let cutoff = now.addingTimeInterval(-Self.staleTransactionAge)
-        for entry in entries
-        where prefixes.contains(where: { entry.lastPathComponent.hasPrefix($0) })
-        {
+        for entry in entries where prefixes.contains(where: { entry.lastPathComponent.hasPrefix($0) }) {
             guard
                 let values = try? entry.resourceValues(forKeys: keys),
                 values.isDirectory == true,
