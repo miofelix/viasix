@@ -1,8 +1,9 @@
 package dev.viasix.app.tun
 
-import java.util.concurrent.LinkedBlockingQueue
+import java.util.ArrayDeque
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /** A bounded TUN writer queue where datagrams may yield, but TCP stream packets never do. */
 class OutboundPacketQueue(capacity: Int) {
@@ -11,61 +12,90 @@ class OutboundPacketQueue(capacity: Int) {
         val lossless: Boolean,
     )
 
-    private val queue = LinkedBlockingQueue<Entry>(capacity)
-    private val offerLock = Any()
-    private val cancelled = AtomicBoolean(false)
+    private val capacity = capacity.also { require(it > 0) }
+    private val queue = ArrayDeque<Entry>(capacity)
+    private val lock = ReentrantLock(true)
+    private val notEmpty = lock.newCondition()
+    private val notFull = lock.newCondition()
+    private var cancelled = false
 
     fun offer(
         packet: ByteArray,
         lossless: Boolean,
         timeoutMs: Long = 0L,
     ): Boolean =
-        synchronized(offerLock) {
-            if (cancelled.get()) return@synchronized false
+        lock.withLock {
+            if (cancelled) return false
             val entry = Entry(packet, lossless)
-            if (queue.offer(entry)) return@synchronized keepUnlessCancelled(entry)
-            if (removeDroppable() && queue.offer(entry)) {
-                return@synchronized keepUnlessCancelled(entry)
+            if (queue.size < capacity) {
+                enqueue(entry)
+                return true
             }
-            if (lossless) {
-                return@synchronized try {
-                    queue.offer(entry, timeoutMs.coerceAtLeast(0L), TimeUnit.MILLISECONDS) &&
-                        keepUnlessCancelled(entry)
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    false
-                }
+            if (removeDroppable()) {
+                enqueue(entry)
+                return true
             }
-            false
+            if (!lossless) return false
+
+            var remaining = TimeUnit.MILLISECONDS.toNanos(timeoutMs.coerceAtLeast(0L))
+            while (!cancelled && queue.size >= capacity) {
+                if (remaining <= 0L) return false
+                remaining =
+                    try {
+                        notFull.awaitNanos(remaining)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        return false
+                    }
+            }
+            if (cancelled) return false
+            enqueue(entry)
+            true
         }
 
     fun poll(timeoutMs: Long): ByteArray? =
-        if (cancelled.get()) {
-            null
-        } else {
-            pollEntry(timeoutMs)?.takeUnless { cancelled.get() }?.packet
+        lock.withLock {
+            var remaining = TimeUnit.MILLISECONDS.toNanos(timeoutMs.coerceAtLeast(0L))
+            while (!cancelled && queue.isEmpty()) {
+                if (remaining <= 0L) return null
+                remaining =
+                    try {
+                        notEmpty.awaitNanos(remaining)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        return null
+                    }
+            }
+            if (cancelled) return null
+            val entry = queue.removeFirst()
+            notFull.signal()
+            entry.packet
         }
 
     fun cancel() {
-        if (cancelled.compareAndSet(false, true)) queue.clear()
-    }
-
-    private fun pollEntry(timeoutMs: Long): Entry? =
-        try {
-            queue.poll(timeoutMs.coerceAtLeast(0L), TimeUnit.MILLISECONDS)
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-            null
+        lock.withLock {
+            if (cancelled) return
+            cancelled = true
+            queue.clear()
+            notEmpty.signalAll()
+            notFull.signalAll()
         }
-
-    private fun keepUnlessCancelled(entry: Entry): Boolean {
-        if (!cancelled.get()) return true
-        queue.remove(entry)
-        return false
     }
 
     private fun removeDroppable(): Boolean {
-        val droppable = queue.firstOrNull { !it.lossless } ?: return false
-        return queue.remove(droppable)
+        val iterator = queue.iterator()
+        while (iterator.hasNext()) {
+            if (!iterator.next().lossless) {
+                iterator.remove()
+                notFull.signal()
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun enqueue(entry: Entry) {
+        queue.addLast(entry)
+        notEmpty.signal()
     }
 }

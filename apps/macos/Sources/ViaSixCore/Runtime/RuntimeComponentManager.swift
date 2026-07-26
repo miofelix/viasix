@@ -182,6 +182,7 @@ public enum RuntimeComponentError: LocalizedError, Equatable, Sendable {
 
 public actor RuntimeComponentManager {
     private static let extractionTimeout: Duration = .seconds(120)
+    private static let staleTransactionAge: TimeInterval = 24 * 60 * 60
     private static let legacyPayloadNames = ["xray", "geoip.dat", "geosite.dat"]
     private static let gzipExtractionScript = #"""
         umask 077
@@ -517,6 +518,7 @@ public actor RuntimeComponentManager {
         guard !operationInProgress else {
             throw RuntimeComponentError.operationInProgress
         }
+        removeStaleTransactionDirectories()
         operationInProgress = true
     }
 
@@ -707,6 +709,40 @@ public actor RuntimeComponentManager {
             ".\(runtimeDirectory.lastPathComponent)-\(prefix)-\(UUID().uuidString)",
             isDirectory: true
         )
+    }
+
+    private func removeStaleTransactionDirectories(now: Date = Date()) {
+        let fileManager = FileManager.default
+        let parent = runtimeDirectory.deletingLastPathComponent()
+        let prefixes = ["download", "install"].map {
+            ".\(runtimeDirectory.lastPathComponent)-\($0)-"
+        }
+        let keys: Set<URLResourceKey> = [
+            .isDirectoryKey,
+            .isSymbolicLinkKey,
+            .contentModificationDateKey,
+        ]
+        guard
+            let entries = try? fileManager.contentsOfDirectory(
+                at: parent,
+                includingPropertiesForKeys: Array(keys),
+                options: [.skipsSubdirectoryDescendants]
+            )
+        else { return }
+
+        let cutoff = now.addingTimeInterval(-Self.staleTransactionAge)
+        for entry in entries
+        where prefixes.contains(where: { entry.lastPathComponent.hasPrefix($0) })
+        {
+            guard
+                let values = try? entry.resourceValues(forKeys: keys),
+                values.isDirectory == true,
+                values.isSymbolicLink != true,
+                let modifiedAt = values.contentModificationDate,
+                modifiedAt <= cutoff
+            else { continue }
+            try? fileManager.removeItem(at: entry)
+        }
     }
 
     private static func discoverFiles(

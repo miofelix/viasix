@@ -1,5 +1,7 @@
 //! Local mixed-proxy invariants aligned with macOS (loopback-only listen).
 
+use std::net::Ipv6Addr;
+
 /// Returns Ok(normalized) when address is loopback; Err with contract-style message otherwise.
 pub fn validate_listen_address(raw: &str) -> Result<String, String> {
     let addr = raw.trim();
@@ -7,10 +9,8 @@ pub fn validate_listen_address(raw: &str) -> Result<String, String> {
         return Err("listenAddress required".into());
     }
     // macOS ViaSix only allows loopback mixed-proxy listeners.
-    let ok = matches!(
-        addr,
-        "127.0.0.1" | "::1" | "localhost" | "0:0:0:0:0:0:0:1"
-    ) || addr.eq_ignore_ascii_case("localhost");
+    let ok = matches!(addr, "127.0.0.1" | "::1" | "localhost" | "0:0:0:0:0:0:0:1")
+        || addr.eq_ignore_ascii_case("localhost");
     if !ok {
         return Err(format!(
             "listenAddress must be loopback (127.0.0.1 or ::1), got {addr}"
@@ -69,10 +69,9 @@ pub fn validate_selected_address_for_mode(
 }
 
 fn looks_like_ipv6(value: &str) -> bool {
-    if value.contains('.') {
-        return false;
-    }
-    value.contains(':') && value.chars().all(|c| c.is_ascii_hexdigit() || c == ':')
+    value
+        .parse::<Ipv6Addr>()
+        .is_ok_and(|address| address.to_ipv4_mapped().is_none())
 }
 
 /// Merge kernel log tail lines into display-friendly activity messages.
@@ -91,9 +90,7 @@ pub fn kernel_log_lines_for_activity(raw: &str, max_lines: usize) -> Vec<String>
 }
 
 /// Format activity entries for file export (TSV-ish, stable for diagnostics).
-pub fn format_activity_export(
-    entries: &[(u64, &str, &str, &str)],
-) -> String {
+pub fn format_activity_export(entries: &[(u64, &str, &str, &str)]) -> String {
     // (at_ms, level, source, message)
     let mut out = String::from("at_ms\tlevel\tsource\tmessage\n");
     for (at, level, source, message) in entries {
@@ -130,7 +127,10 @@ mod tests {
     fn kernel_log_lines_preserve_order_and_cap() {
         let raw = "a\nb\nc\nd\n";
         let lines = kernel_log_lines_for_activity(raw, 2);
-        assert_eq!(lines, vec!["[mihomo] c".to_string(), "[mihomo] d".to_string()]);
+        assert_eq!(
+            lines,
+            vec!["[mihomo] c".to_string(), "[mihomo] d".to_string()]
+        );
     }
 
     #[test]
@@ -166,6 +166,32 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("2001:db8::1")
+        );
+    }
+
+    #[test]
+    fn selected_address_uses_the_same_strict_ipv6_parser_as_projection() {
+        for invalid in [
+            ":::1",
+            "2001:db8::1::2",
+            "2001:db8:zz::1",
+            "fe80::1%12",
+            "::ffff:192.0.2.1",
+            "::ffff:c000:201",
+        ] {
+            let error =
+                validate_selected_address_for_mode("rule", Some(invalid)).expect_err(invalid);
+            assert!(error.contains("must be IPv6"), "{invalid}: {error}");
+        }
+
+        assert_eq!(
+            validate_selected_address_for_mode(
+                "rule",
+                Some("2001:0DB8:0000:0000:0000:0000:0000:0001"),
+            )
+            .unwrap()
+            .as_deref(),
+            Some("2001:0DB8:0000:0000:0000:0000:0000:0001")
         );
     }
 

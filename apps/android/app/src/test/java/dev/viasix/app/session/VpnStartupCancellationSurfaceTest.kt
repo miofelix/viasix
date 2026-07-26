@@ -14,8 +14,10 @@ class VpnStartupCancellationSurfaceTest {
             ).readText()
 
         assertTrue(service.contains("catch (error: VpnStartupCancelledException)"))
-        assertTrue(service.contains("finishCancelledStartup()"))
-        assertTrue(service.contains("stopStackOnly(\"startup cancelled\")"))
+        assertTrue(service.contains("shutdownGate.isShuttingDown()"))
+        assertTrue(service.contains("shutdownGate.completeTeardown()"))
+        assertTrue(service.contains("ShutdownSubmission.QUEUED"))
+        assertTrue(service.contains("thread(name = \"viasix-vpn-stop\""))
         assertTrue(service.contains("stopForeground(STOP_FOREGROUND_REMOVE)"))
         assertTrue(service.contains("requireStartupActive(\"after mihomo launch\")"))
         assertTrue(service.contains("requireStartupActive(\"after VPN establish\")"))

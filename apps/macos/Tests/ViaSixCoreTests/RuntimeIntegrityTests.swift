@@ -531,6 +531,44 @@ final class RuntimeIntegrityTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
     }
 
+    func testNewOperationRemovesOnlyStaleTransactionDirectories() async throws {
+        let root = makeRoot()
+        let runtimeURL = root.appendingPathComponent("Runtime", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let stale = root.appendingPathComponent(".Runtime-download-stale", isDirectory: true)
+        let fresh = root.appendingPathComponent(".Runtime-install-fresh", isDirectory: true)
+        let unrelated = root.appendingPathComponent(".Other-download-stale", isDirectory: true)
+        for directory in [stale, fresh, unrelated] {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: false
+            )
+        }
+        let oldDate = Date().addingTimeInterval(-48 * 60 * 60)
+        try FileManager.default.setAttributes(
+            [.modificationDate: oldDate],
+            ofItemAtPath: stale.path
+        )
+        try FileManager.default.setAttributes(
+            [.modificationDate: oldDate],
+            ofItemAtPath: unrelated.path
+        )
+
+        let manager = RuntimeComponentManager(runtimeDirectory: runtimeURL)
+        do {
+            _ = try await manager.install(from: root.appendingPathComponent("Missing"))
+            XCTFail("Expected missing source")
+        } catch let error as RuntimeComponentError {
+            XCTAssertEqual(error, .sourceNotFound(root.appendingPathComponent("Missing")))
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stale.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fresh.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path))
+    }
+
     private func makeRoot() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("ViaSix-RuntimeIntegrity-\(UUID().uuidString)", isDirectory: true)

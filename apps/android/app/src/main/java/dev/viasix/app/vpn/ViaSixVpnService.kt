@@ -13,6 +13,8 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.service.quicksettings.TileService
 import android.system.OsConstants
@@ -37,6 +39,8 @@ import dev.viasix.app.session.RuntimeEventSequence
 import dev.viasix.app.session.RuntimeProcessIdentity
 import dev.viasix.app.session.RuntimeStackFailure
 import dev.viasix.app.session.RuntimeStackHealth
+import dev.viasix.app.session.ShutdownRestartGate
+import dev.viasix.app.session.ShutdownSubmission
 import dev.viasix.app.session.UnderlyingNetworkPresentation
 import dev.viasix.app.session.UnderlyingNetworkSelection
 import dev.viasix.app.session.VpnStartOrigin
@@ -60,7 +64,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
 /**
@@ -80,8 +83,9 @@ class ViaSixVpnService : VpnService() {
     private var mihomo: MihomoProcess? = null
     private var tunEngine: Tun2SocksEngine? = null
     private val startRequests = LatestRequestGate<StartRequest>()
-    private val shuttingDown = AtomicBoolean(false)
+    private val shutdownGate = ShutdownRestartGate<StartRequest>()
     private val trafficLoopGate = GenerationGate()
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     @Volatile
     private var trafficThread: Thread? = null
@@ -161,10 +165,13 @@ class ViaSixVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             appendEvent("用户停止会话", "info")
-            shutdownAll("stopped by user", stopService = true)
+            shutdownAll(
+                reason = "stopped by user",
+                stopService = true,
+                asynchronous = true,
+            )
             return START_NOT_STICKY
         }
-        if (shuttingDown.get()) return START_NOT_STICKY
 
         val startOrigin =
             VpnStartOrigin.detect(
@@ -249,6 +256,11 @@ class ViaSixVpnService : VpnService() {
             "info",
         )
 
+        if (shutdownGate.submit(request) == ShutdownSubmission.QUEUED) {
+            appendEvent("关停进行中，已保留最新启动请求", "info")
+            return START_STICKY
+        }
+
         if (!startRequests.submit(request)) {
             appendEvent("已有启动任务进行中，已合并为最新请求", "info")
             return START_STICKY
@@ -259,7 +271,7 @@ class ViaSixVpnService : VpnService() {
 
     private fun launchStartupWorker() {
         thread(name = "viasix-vpn-start", isDaemon = true) {
-            while (!shuttingDown.get()) {
+            while (!shutdownGate.isShuttingDown()) {
                 val request = startRequests.takeNext() ?: break
                 try {
                     requireStartupActive("before restart cleanup")
@@ -290,12 +302,10 @@ class ViaSixVpnService : VpnService() {
                     )
                 } catch (error: VpnStartupCancelledException) {
                     Log.i(TAG, error.message.orEmpty())
-                    finishCancelledStartup()
                     break
                 } catch (error: Exception) {
-                    if (shuttingDown.get()) {
+                    if (shutdownGate.isShuttingDown()) {
                         Log.i(TAG, "startup stopped during ${error.javaClass.simpleName}")
-                        finishCancelledStartup()
                     } else {
                         Log.e(TAG, "start failed", error)
                         appendEvent("启动失败：${error.message}", "error")
@@ -563,20 +573,10 @@ class ViaSixVpnService : VpnService() {
     }
 
     private fun requireStartupActive(stage: String) {
-        VpnStartupGate.requireActive(shuttingDown = shuttingDown.get(), stage = stage)
-    }
-
-    private fun finishCancelledStartup() {
-        stopStackOnly("startup cancelled")
-        writeRuntimeStatus(
-            phase = ConnectionPhase.STOPPED,
-            healthMessage = "stopped",
-            secret = "",
-            version = null,
-            startedAt = null,
+        VpnStartupGate.requireActive(
+            shuttingDown = shutdownGate.isShuttingDown(),
+            stage = stage,
         )
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        appendEvent("启动已取消", "info")
     }
 
     private fun applyAppRouting(
@@ -677,7 +677,7 @@ class ViaSixVpnService : VpnService() {
         val supervisor = trafficThread
         trafficThread = null
         try {
-            supervisor?.interrupt()
+            if (supervisor !== Thread.currentThread()) supervisor?.interrupt()
         } catch (_: Exception) {
         }
     }
@@ -697,7 +697,11 @@ class ViaSixVpnService : VpnService() {
 
     override fun onRevoke() {
         appendEvent("系统撤销 VPN 权限", "warning")
-        shutdownAll("vpn permission revoked", stopService = true)
+        shutdownAll(
+            reason = "vpn permission revoked",
+            stopService = true,
+            asynchronous = true,
+        )
         super.onRevoke()
     }
 
@@ -725,8 +729,12 @@ class ViaSixVpnService : VpnService() {
         tunnel = null
     }
 
-    private fun shutdownAll(reason: String, stopService: Boolean) {
-        if (!shuttingDown.compareAndSet(false, true)) return
+    private fun shutdownAll(
+        reason: String,
+        stopService: Boolean,
+        asynchronous: Boolean = false,
+    ) {
+        if (!shutdownGate.beginShutdown()) return
         startRequests.cancelPending()
         Log.i(TAG, "shutdown: $reason")
         writeRuntimeStatus(
@@ -736,18 +744,32 @@ class ViaSixVpnService : VpnService() {
             version = null,
             startedAt = null,
         )
-        stopStackOnly(reason)
-        writeRuntimeStatus(
-            phase = ConnectionPhase.STOPPED,
-            healthMessage = "stopped",
-            secret = "",
-            version = null,
-            startedAt = null,
-        )
-        appendEvent("会话结束：$reason", "info")
-        if (stopService) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+        val teardown = {
+            stopStackOnly(reason)
+            writeRuntimeStatus(
+                phase = ConnectionPhase.STOPPED,
+                healthMessage = "stopped",
+                secret = "",
+                version = null,
+                startedAt = null,
+            )
+            appendEvent("会话结束：$reason", "info")
+            val restart = shutdownGate.completeTeardown()
+            if (restart != null) {
+                appendEvent("关停完成，正在执行最新启动请求", "info")
+                if (startRequests.submit(restart)) launchStartupWorker()
+            } else if (stopService) {
+                mainHandler.post {
+                    if (!shutdownGate.commitServiceStop()) return@post
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
+            }
+        }
+        if (asynchronous) {
+            thread(name = "viasix-vpn-stop", isDaemon = true, block = teardown)
+        } else {
+            teardown()
         }
     }
 

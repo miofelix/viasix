@@ -6,6 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
@@ -78,6 +79,32 @@ class OutboundPacketQueueTest {
         assertNull(queue.poll(timeoutMs = 0L))
         assertFalse(queue.offer(byteArrayOf(3), lossless = true, timeoutMs = 0L))
         assertFalse(queue.offer(byteArrayOf(4), lossless = false))
+    }
+
+    @Test
+    fun blockedLosslessProducerDoesNotBlockOtherProducers() {
+        val queue = OutboundPacketQueue(capacity = 1)
+        assertTrue(queue.offer(byteArrayOf(1), lossless = true))
+        val executor = Executors.newFixedThreadPool(2)
+
+        try {
+            val waitingLossless =
+                executor.submit<Boolean> {
+                    queue.offer(byteArrayOf(2), lossless = true, timeoutMs = 5_000L)
+                }
+            Thread.sleep(50L)
+            val datagram =
+                executor.submit<Boolean> {
+                    queue.offer(byteArrayOf(3), lossless = false)
+                }
+
+            assertFalse(datagram.get(1, TimeUnit.SECONDS))
+            queue.cancel()
+            assertFalse(waitingLossless.get(1, TimeUnit.SECONDS))
+        } finally {
+            queue.cancel()
+            executor.shutdownNow()
+        }
     }
 
     private fun awaitState(
