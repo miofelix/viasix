@@ -249,7 +249,18 @@ public struct MihomoServerConfiguration: Equatable, Sendable {
 
     private static func isIPv6Address(_ value: String) -> Bool {
         var address = in6_addr()
-        return value.withCString { inet_pton(AF_INET6, $0, &address) == 1 }
+        guard value.withCString({ inet_pton(AF_INET6, $0, &address) == 1 }) else {
+            return false
+        }
+        // Reject IPv4-mapped IPv6 (::ffff:a.b.c.d): the first 10 bytes are zero
+        // followed by 0xff 0xff. These embed an IPv4 endpoint rather than a real
+        // IPv6 exit, so the contract rejects them on every platform.
+        let bytes = withUnsafeBytes(of: &address) { Array($0) }
+        let isV4Mapped = bytes.count == 16
+            && bytes[0..<10].allSatisfy { $0 == 0 }
+            && bytes[10] == 0xff
+            && bytes[11] == 0xff
+        return !isV4Mapped
     }
 
     private static func serverMapping(from input: [String: Any]) throws -> [String: Any] {

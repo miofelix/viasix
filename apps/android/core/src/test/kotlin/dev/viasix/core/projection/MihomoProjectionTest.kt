@@ -31,6 +31,15 @@ class MihomoProjectionTest {
     }
 
     @Test
+    fun rejectsIpv4MappedSelectedAddress() {
+        // ::ffff:a.b.c.d embeds an IPv4 endpoint, not a real IPv6 exit. The
+        // contract rejects it uniformly across platforms.
+        assertThrows<ProjectError.SelectedNodeMustBeIPv6> {
+            MihomoProjection.project(inlineProfile, options(selected = "::ffff:203.0.113.8"))
+        }
+    }
+
+    @Test
     fun rejectsUnsupportedXViasixVersion() {
         val profile =
             profileWithExtension(

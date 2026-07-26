@@ -352,7 +352,13 @@ fn resolve_selected_address(selected: Option<&str>) -> Result<String, ProjectErr
     let Some(raw) = selected.map(str::trim).filter(|s| !s.is_empty()) else {
         return Err(ProjectError::SelectedNodeMustBeIPv6);
     };
-    if Ipv6Addr::from_str(raw).is_err() {
+    let Ok(addr) = Ipv6Addr::from_str(raw) else {
+        return Err(ProjectError::SelectedNodeMustBeIPv6);
+    };
+    // Reject IPv4-mapped IPv6 (::ffff:a.b.c.d): these embed an IPv4 endpoint and
+    // are not a real IPv6 exit. Contract requires a genuine global IPv6 address,
+    // matching Android where Java collapses such literals to Inet4Address.
+    if addr.to_ipv4_mapped().is_some() {
         return Err(ProjectError::SelectedNodeMustBeIPv6);
     }
     Ok(raw.to_string())
@@ -558,6 +564,26 @@ mod extension_tests {
         let root = project("x-viasix:\n  version: 1\n  primary-server: selected-ip\n")
             .expect("supported extension must project");
         assert!(root.contains_key(Value::from("proxies")));
+    }
+
+    #[test]
+    fn rejects_ipv4_mapped_selected_address() {
+        let opts = ProjectOptions {
+            selected_address: Some("::ffff:203.0.113.8".into()),
+            ..ProjectOptions::default()
+        };
+        let err = project_runtime(Some(INLINE_PROFILE), &opts)
+            .expect_err("IPv4-mapped IPv6 must be rejected");
+        assert_eq!(err, ProjectError::SelectedNodeMustBeIPv6);
+    }
+
+    #[test]
+    fn accepts_genuine_ipv6_selected_address() {
+        let opts = ProjectOptions {
+            selected_address: Some("2606:4700::8".into()),
+            ..ProjectOptions::default()
+        };
+        assert!(project_runtime(Some(INLINE_PROFILE), &opts).is_ok());
     }
 }
 

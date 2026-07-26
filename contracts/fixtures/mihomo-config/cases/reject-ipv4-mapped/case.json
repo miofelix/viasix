@@ -1,0 +1,11 @@
+{
+  "id": "reject-ipv4-mapped",
+  "description": "Rule/global projections must reject IPv4-mapped IPv6 selected addresses (::ffff:a.b.c.d): these embed an IPv4 endpoint, not a real IPv6 exit.",
+  "selectedAddress": "::ffff:203.0.113.8",
+  "routingMode": "rule",
+  "projection": "user",
+  "expect": {
+    "success": false,
+    "errorCode": "selectedNodeMustBeIPv6"
+  }
+}
