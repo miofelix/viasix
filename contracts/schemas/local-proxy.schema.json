@@ -49,6 +49,11 @@
       "minimum": 1280,
       "maximum": 9000,
       "default": 1500
+    },
+    "tunStrictRoute": {
+      "type": "boolean",
+      "default": true,
+      "description": "TUN strict-route: bind tunnel routes so traffic cannot bypass the interface (anti-leak). Platforms without Mihomo TUN (e.g. Android userspace tun2socks) ignore this field. Desktop UIs may expose a toggle; the contract default is enabled."
     }
   }
 }

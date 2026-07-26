@@ -91,7 +91,7 @@ public struct LocalProxyConfiguration: Codable, Equatable, Sendable {
         systemProxyEnabled: Bool = false,
         tunStack: VirtualInterfaceStack = .mixed,
         tunMTU: Int = 1_500,
-        tunStrictRoute: Bool = false
+        tunStrictRoute: Bool = true
     ) {
         version = Self.schemaVersion
         self.listenAddress = listenAddress

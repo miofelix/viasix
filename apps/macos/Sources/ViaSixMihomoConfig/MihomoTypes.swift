@@ -113,7 +113,7 @@ public struct MihomoTunConfiguration: Codable, Equatable, Sendable {
 
     public init(
         stack: MihomoTunStack = .mixed,
-        strictRoute: Bool = false,
+        strictRoute: Bool = true,
         mtu: Int = 1_500,
         routeExcludeAddresses: [String] = []
     ) {
