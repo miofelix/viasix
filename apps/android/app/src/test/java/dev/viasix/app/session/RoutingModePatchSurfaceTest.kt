@@ -35,6 +35,9 @@ class RoutingModePatchSurfaceTest {
         assertTrue(patch.contains("secret = routingSessionKey.secret"))
         assertTrue(patch.contains("runtimeStore.load().sessionKey() == routingSessionKey"))
         assertTrue(patch.contains("current.copy(routingModeSyncing = false)"))
+        assertTrue(patch.contains("ControllerClient.updateRoutingMode("))
+        assertTrue(patch.contains("result.restartRequired"))
+        assertTrue(patch.contains("startVpn(reason = \"routing-mode\")"))
         assertFalse(patch.contains("getSharedPreferences"))
         assertFalse(patch.contains("state.runtime.controllerPort"))
 

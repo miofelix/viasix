@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import dev.viasix.app.state.SessionUiState
+import dev.viasix.app.session.SessionConfigurationActions
 import dev.viasix.app.ui.AppSection
 import dev.viasix.app.ui.theme.AppPageHeader
 import dev.viasix.app.ui.theme.AppTone
@@ -50,6 +51,8 @@ fun ProfilesScreen(
     val summary = state.profileSummary
     val draftSummary = state.profileDraftSummary
     val draftIssue = state.profileDraftIssue
+    val canApply = state.profileHasUnsavedChanges && draftIssue == null &&
+        SessionConfigurationActions.canApply(state.connectionPhase)
     val tone =
         when {
             summary.isManaged -> AppTone.Accent
@@ -222,14 +225,14 @@ fun ProfilesScreen(
                         ) {
                             OutlinedButton(
                                 onClick = { onApplyProfile(false) },
-                                enabled = state.profileHasUnsavedChanges && draftIssue == null,
+                                enabled = canApply,
                                 modifier = Modifier.weight(1f),
                             ) {
                                 Text("仅保存")
                             }
                             Button(
                                 onClick = { onApplyProfile(true) },
-                                enabled = state.profileHasUnsavedChanges && draftIssue == null,
+                                enabled = canApply,
                                 modifier = Modifier.weight(1f),
                             ) {
                                 Text("应用并重连")
@@ -238,7 +241,7 @@ fun ProfilesScreen(
                     } else {
                         Button(
                             onClick = { onApplyProfile(false) },
-                            enabled = state.profileHasUnsavedChanges && draftIssue == null,
+                            enabled = canApply,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Text("应用配置")

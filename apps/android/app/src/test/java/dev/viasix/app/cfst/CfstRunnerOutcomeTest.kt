@@ -8,6 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.io.path.createTempDirectory
 import kotlin.concurrent.thread
 
@@ -143,6 +144,44 @@ class CfstRunnerOutcomeTest {
             assertFalse(first.isRunning)
         } finally {
             CfstRunner().requestCancel()
+            worker.join(5_000)
+            work.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun cancellationFromInitializationRemainsEffectiveDuringTheRun() {
+        val work = createTempDirectory("cfst-durable-cancel").toFile()
+        val marker = File(work, "started")
+        val script = File(work, "blocking-cfst").apply {
+            writeText("#!/bin/sh\ntouch started\nwhile :; do sleep 1; done\n")
+            setExecutable(true)
+        }
+        val requested = AtomicBoolean(false)
+        val runner = CfstRunner()
+        val outcome = AtomicReference<CfstRunOutcome>()
+        val worker = thread {
+            outcome.set(runner.run(
+                binary = script,
+                workDir = work,
+                parameters = SpeedTestParameters.defaultsForRange(),
+                isCancellationRequested = requested::get,
+            ))
+        }
+        try {
+            val deadline = System.nanoTime() + 2_000_000_000L
+            while (!marker.exists() && System.nanoTime() < deadline) Thread.sleep(10)
+            assertTrue("fixture process must start before cancellation", marker.exists())
+
+            // No requestCancel/process handle is needed for a durable task cancellation.
+            requested.set(true)
+            worker.join(5_000)
+            assertFalse(worker.isAlive)
+            assertEquals(CfstRunOutcome.Cancelled, outcome.get())
+            assertFalse(runner.isRunning)
+        } finally {
+            requested.set(true)
+            runner.requestCancel()
             worker.join(5_000)
             work.deleteRecursively()
         }

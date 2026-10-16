@@ -32,10 +32,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -43,7 +40,11 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import dev.viasix.app.runtime.RuntimeComponentId
 import dev.viasix.app.state.SessionUiState
+import dev.viasix.app.session.SessionConfigurationActions
 import dev.viasix.app.ui.AppSection
+import dev.viasix.app.ui.SpeedNumericField
+import dev.viasix.app.ui.SpeedParameterInputs
+import dev.viasix.app.ui.formatDecimalInput
 import dev.viasix.app.ui.theme.AppPageHeader
 import dev.viasix.app.ui.theme.AppTone
 import dev.viasix.app.ui.theme.CardHeader
@@ -74,11 +75,14 @@ fun NodesScreen(
     onStopSpeedTest: () -> Unit = {},
     onStartCurrentNodeTest: () -> Unit = {},
     onSpeedSortChange: (NodeSortKey) -> Unit = {},
+    parameterInputs: SpeedParameterInputs = remember { SpeedParameterInputs() },
 ) {
     val colors = LocalViaSixColors.current
     val looksValid = Ipv6Address.isValid(state.selectedAddress)
     val speed = state.speedTest
     val cfstRepairing = state.runtimeComponents.repairing == RuntimeComponentId.CFST
+    val inputIssue = parameterInputs.validationMessage(speed.parameters)
+    val canReconnect = SessionConfigurationActions.canReconnect(state)
 
     Column(Modifier.fillMaxSize()) {
         AppPageHeader(
@@ -162,7 +166,7 @@ fun NodesScreen(
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    speed.parameterValidationMessage?.let { msg ->
+                    (inputIssue ?: speed.parameterValidationMessage)?.let { msg ->
                         Text(
                             msg,
                             style = MaterialTheme.typography.bodySmall,
@@ -267,9 +271,13 @@ fun NodesScreen(
                     if (speed.parametersExpanded) {
                         MacosStyleParametersPanel(
                             parameters = speed.parameters,
+                            inputs = parameterInputs,
                             enabled = !speed.isRunning,
                             onChange = onSpeedParametersChange,
-                            onReset = onResetSpeedParameters,
+                            onReset = {
+                                parameterInputs.reset()
+                                onResetSpeedParameters()
+                            },
                         )
                     }
 
@@ -279,7 +287,7 @@ fun NodesScreen(
                     ) {
                         Button(
                             onClick = onStartSpeedTest,
-                            enabled = speed.canStartSpeedTest && !cfstRepairing,
+                            enabled = speed.canStartSpeedTest && !cfstRepairing && inputIssue == null,
                             modifier = Modifier.weight(1f),
                         ) {
                             Text(
@@ -300,7 +308,8 @@ fun NodesScreen(
                     }
                     OutlinedButton(
                         onClick = onStartCurrentNodeTest,
-                        enabled = !speed.isRunning && looksValid && !cfstRepairing,
+                        enabled = !speed.isRunning && looksValid && !cfstRepairing &&
+                            parameterInputs.validationMessage(speed.parameters, currentNodeTest = true) == null,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text(
@@ -390,7 +399,7 @@ fun NodesScreen(
                         sorted.forEachIndexed { index, row ->
                             SpeedResultRow(
                                 result = row,
-                                vpnRunning = state.runtime.running,
+                                vpnRunning = canReconnect,
                                 onApply = { onApplyNode(row.ip, false) },
                                 onApplyReconnect = { onApplyNode(row.ip, true) },
                                 onCopy = { onCopy("IPv6", row.ip) },
@@ -451,7 +460,7 @@ fun NodesScreen(
                         }
                         FilledTonalButton(
                             onClick = { onApplyNode(state.selectedAddress, true) },
-                            enabled = looksValid && state.runtime.running,
+                            enabled = looksValid && canReconnect,
                             modifier = Modifier.weight(1f),
                         ) {
                             Text("应用并重连")
@@ -528,6 +537,7 @@ fun NodesScreen(
                                 if (state.runtime.running) {
                                     FilledTonalButton(
                                         onClick = { onApplyNode(address, true) },
+                                        enabled = canReconnect,
                                         modifier = Modifier.height(34.dp),
                                     ) { Text("重连") }
                                 }
@@ -578,6 +588,7 @@ fun NodesScreen(
 @Composable
 private fun MacosStyleParametersPanel(
     parameters: SpeedTestParameters,
+    inputs: SpeedParameterInputs,
     enabled: Boolean,
     onChange: (SpeedTestParameters) -> Unit,
     onReset: () -> Unit,
@@ -603,6 +614,8 @@ private fun MacosStyleParametersPanel(
             )
         }
         IntField(
+            field = SpeedNumericField.PORT,
+            inputs = inputs,
             label = "测速端口",
             value = p.port,
             enabled = enabled,
@@ -610,6 +623,8 @@ private fun MacosStyleParametersPanel(
         )
         if (p.httping) {
             IntField(
+                field = SpeedNumericField.HTTPING_CODE,
+                inputs = inputs,
                 label = "HTTP 状态码（0=默认）",
                 value = p.httpingCode,
                 enabled = enabled,
@@ -629,31 +644,31 @@ private fun MacosStyleParametersPanel(
             onValueChange = { onChange(p.copy(url = it)) },
             modifier = Modifier.fillMaxWidth(),
             label = { Text("测速 URL（可空）") },
-            enabled = enabled && !p.disableDownload,
+            enabled = enabled && (p.httping || !p.disableDownload),
             singleLine = true,
         )
 
         Text("筛选条件", style = MaterialTheme.typography.titleSmall)
-        IntField("延迟上限 (ms)", p.latencyUpperBound, enabled) {
+        IntField(SpeedNumericField.LATENCY_UPPER, inputs, "延迟上限 (ms)", p.latencyUpperBound, enabled) {
             onChange(p.copy(latencyUpperBound = it))
         }
-        IntField("延迟下限 (ms)", p.latencyLowerBound, enabled) {
+        IntField(SpeedNumericField.LATENCY_LOWER, inputs, "延迟下限 (ms)", p.latencyLowerBound, enabled) {
             onChange(p.copy(latencyLowerBound = it))
         }
-        DoubleField("丢包率上限 (0–1)", p.lossRateUpperBound, enabled) {
+        DoubleField(SpeedNumericField.LOSS_UPPER, inputs, "丢包率上限 (0–1)", p.lossRateUpperBound, enabled) {
             onChange(p.copy(lossRateUpperBound = it))
         }
-        DoubleField("下载速度下限 (MB/s)", p.speedLowerBound, enabled && !p.disableDownload) {
+        DoubleField(SpeedNumericField.SPEED_LOWER, inputs, "下载速度下限 (MB/s)", p.speedLowerBound, enabled && !p.disableDownload) {
             onChange(p.copy(speedLowerBound = it))
         }
 
         Text("性能调优", style = MaterialTheme.typography.titleSmall)
-        IntField("延迟测速线程", p.threads, enabled) { onChange(p.copy(threads = it)) }
-        IntField("单 IP Ping 次数", p.pingCount, enabled) { onChange(p.copy(pingCount = it)) }
-        IntField("下载测速数量", p.downloadCount, enabled && !p.disableDownload) {
+        IntField(SpeedNumericField.THREADS, inputs, "延迟测速线程", p.threads, enabled) { onChange(p.copy(threads = it)) }
+        IntField(SpeedNumericField.PING_COUNT, inputs, "单 IP Ping 次数", p.pingCount, enabled) { onChange(p.copy(pingCount = it)) }
+        IntField(SpeedNumericField.DOWNLOAD_COUNT, inputs, "下载测速数量", p.downloadCount, enabled && !p.disableDownload) {
             onChange(p.copy(downloadCount = it))
         }
-        IntField("单 IP 下载时长 (s)", p.downloadTime, enabled && !p.disableDownload) {
+        IntField(SpeedNumericField.DOWNLOAD_TIME, inputs, "单 IP 下载时长 (s)", p.downloadTime, enabled && !p.disableDownload) {
             onChange(p.copy(downloadTime = it))
         }
         Row(
@@ -686,12 +701,16 @@ private fun MacosStyleParametersPanel(
 
 @Composable
 private fun IntField(
+    field: SpeedNumericField,
+    inputs: SpeedParameterInputs,
     label: String,
     value: Int,
     enabled: Boolean,
     onValue: (Int) -> Unit,
 ) {
     NumericField(
+        field = field,
+        inputs = inputs,
         label = label,
         value = value,
         enabled = enabled,
@@ -706,34 +725,31 @@ private fun IntField(
 
 @Composable
 private fun DoubleField(
+    field: SpeedNumericField,
+    inputs: SpeedParameterInputs,
     label: String,
     value: Double,
     enabled: Boolean,
     onValue: (Double) -> Unit,
 ) {
     NumericField(
+        field = field,
+        inputs = inputs,
         label = label,
         value = value,
         enabled = enabled,
-        format = { v ->
-            if (v == v.toLong().toDouble()) {
-                v.toLong().toString()
-            } else {
-                v.toString()
-            }
-        },
-        parse = String::toDoubleOrNull,
+        format = ::formatDecimalInput,
+        parse = { it.toDoubleOrNull()?.takeIf(Double::isFinite) },
         keyboardType = KeyboardType.Decimal,
         errorText = "请输入数字",
         onValue = onValue,
     )
 }
 
-/** Text + last value committed upward; raw is kept as typed until it parses. */
-private data class NumericFieldText<T>(val raw: String, val committed: T)
-
 @Composable
 private fun <T : Any> NumericField(
+    field: SpeedNumericField,
+    inputs: SpeedParameterInputs,
     label: String,
     value: T,
     enabled: Boolean,
@@ -743,19 +759,14 @@ private fun <T : Any> NumericField(
     errorText: String,
     onValue: (T) -> Unit,
 ) {
-    // Raw text is local so intermediate edits (empty field, "0.") never snap
-    // back to the committed value mid-typing; only valid parses commit upward.
-    var field by remember { mutableStateOf(NumericFieldText(format(value), value)) }
-    if (field.committed != value) {
-        // External change (恢复默认测速设置 / preset): re-sync the visible text.
-        field = NumericFieldText(format(value), value)
-    }
-    val parseFailed = parse(field.raw) == null
+    // Keep incomplete text in the retained form; only valid parses commit upward.
+    val raw = inputs.text(field, format(value))
+    val parseFailed = parse(raw) == null
     OutlinedTextField(
-        value = field.raw,
+        value = raw,
         onValueChange = { raw ->
             val parsed = parse(raw)
-            field = NumericFieldText(raw, parsed ?: field.committed)
+            inputs.edit(field, raw, format(parsed ?: value), valid = parsed != null)
             parsed?.let(onValue)
         },
         modifier = Modifier.fillMaxWidth(),

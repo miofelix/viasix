@@ -47,13 +47,19 @@ class CfstRunner {
         onProgress: ((current: Int, total: Int, phaseHint: String?) -> Unit)? = null,
         /** Optional Android context so HTTPing can load the system CA store. */
         sslContext: android.content.Context? = null,
+        /** Includes cancellation requested while the caller was preparing the binary/list. */
+        isCancellationRequested: () -> Boolean = { false },
     ): CfstRunOutcome {
         if (!activeRunner.compareAndSet(null, this)) {
             return CfstRunOutcome.Failed("已有测速任务正在运行")
         }
         cancelRequested.set(false)
         return try {
-            runInner(binary, workDir, parameters, onProgress, sslContext)
+            if (isCancellationRequested()) {
+                CfstRunOutcome.Cancelled
+            } else {
+                runInner(binary, workDir, parameters, onProgress, sslContext, isCancellationRequested)
+            }
         } finally {
             processRef.set(null)
             activeRunner.compareAndSet(this, null)
@@ -67,6 +73,7 @@ class CfstRunner {
         parameters: SpeedTestParameters,
         onProgress: ((current: Int, total: Int, phaseHint: String?) -> Unit)?,
         sslContext: android.content.Context?,
+        isCancellationRequested: () -> Boolean,
     ): CfstRunOutcome {
         if (!binary.isFile) {
             return CfstRunOutcome.Failed(
@@ -102,6 +109,7 @@ class CfstRunner {
             }
 
         val command = listOf(binary.absolutePath) + args
+        if (cancelRequested.get() || isCancellationRequested()) return CfstRunOutcome.Cancelled
         logInfo("spawn CFST: ${command.joinToString(" ")}")
 
         val process =
@@ -176,7 +184,7 @@ class CfstRunner {
         logThread.start()
 
         while (true) {
-            if (cancelRequested.get()) {
+            if (cancelRequested.get() || isCancellationRequested()) {
                 terminateProcess(process)
                 try {
                     logThread.join(1_000)
@@ -206,7 +214,7 @@ class CfstRunner {
             Thread.currentThread().interrupt()
         }
 
-        if (cancelRequested.get()) {
+        if (cancelRequested.get() || isCancellationRequested()) {
             return CfstRunOutcome.Cancelled
         }
 

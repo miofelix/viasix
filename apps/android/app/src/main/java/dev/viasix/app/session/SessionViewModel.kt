@@ -6,6 +6,20 @@ import androidx.lifecycle.ViewModel
 import dev.viasix.app.cfst.CfstRunner
 import dev.viasix.app.state.SessionUiState
 import dev.viasix.app.ui.AppSection
+import dev.viasix.app.ui.SpeedParameterInputs
+import java.util.concurrent.atomic.AtomicBoolean
+
+/** Covers the complete task, including initialization before a process exists. */
+class SpeedTestCancellation {
+    private val requested = AtomicBoolean(false)
+
+    val isRequested: Boolean
+        get() = requested.get()
+
+    fun request() {
+        requested.set(true)
+    }
+}
 
 /**
  * Retains ephemeral session state across configuration changes (rotation,
@@ -34,6 +48,25 @@ class SessionViewModel : ViewModel() {
     /** One-at-a-time CFST runner, retained so a run survives rotation. */
     val cfstRunner: CfstRunner = CfstRunner()
 
+    /** Incomplete numeric edits must survive navigation and rotation, like valid parameters. */
+    val speedParameterInputs: SpeedParameterInputs = SpeedParameterInputs()
+
+    private var speedTestCancellation: SpeedTestCancellation? = null
+
+    fun beginSpeedTest(): SpeedTestCancellation =
+        SpeedTestCancellation().also { speedTestCancellation = it }
+
+    fun finishSpeedTest(cancellation: SpeedTestCancellation) {
+        if (speedTestCancellation === cancellation) speedTestCancellation = null
+    }
+
+    fun cancelSpeedTest(): Boolean {
+        val cancellation = speedTestCancellation
+        cancellation?.request()
+        val processCancelled = cfstRunner.requestCancel()
+        return cancellation != null || processCancelled
+    }
+
     private var seeded = false
 
     /** True once [seedIfNeeded] has run; exposed for tests and diagnostics. */
@@ -55,6 +88,7 @@ class SessionViewModel : ViewModel() {
 
     override fun onCleared() {
         // Real teardown only (finish / process removal), never a config change.
+        speedTestCancellation?.request()
         cfstRunner.requestCancel()
         super.onCleared()
     }

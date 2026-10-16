@@ -45,6 +45,8 @@ import dev.viasix.app.session.NotificationPermissionState
 import dev.viasix.app.session.POST_NOTIFICATIONS_PERMISSION
 import dev.viasix.app.session.ProfileDraftGate
 import dev.viasix.app.session.ProfileImportText
+import dev.viasix.app.session.PendingPermissionStarts
+import dev.viasix.app.session.SessionConfigurationActions
 import dev.viasix.app.session.RuntimeEventCursor
 import dev.viasix.app.session.RuntimeSessionKey
 import dev.viasix.app.session.SessionRuntimeStore
@@ -58,7 +60,6 @@ import dev.viasix.app.state.LogLevel
 import dev.viasix.app.state.LogSource
 import dev.viasix.app.state.SessionUiState
 import dev.viasix.app.state.appendLog
-import dev.viasix.app.state.rememberCandidate
 import dev.viasix.app.tile.ViaSixTileService
 import dev.viasix.app.ui.AppSection
 import dev.viasix.app.ui.ViaSixApp
@@ -77,8 +78,13 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 
 class MainActivity : ComponentActivity() {
-    private var pendingVpnStartReason: String? = null
-    private var pendingNotificationStartReason: String? = null
+    private val pendingPermissionStarts = PendingPermissionStarts()
+    private var pendingVpnStartReason: String?
+        get() = pendingPermissionStarts.vpnReason
+        set(value) { pendingPermissionStarts.vpnReason = value }
+    private var pendingNotificationStartReason: String?
+        get() = pendingPermissionStarts.notificationReason
+        set(value) { pendingPermissionStarts.notificationReason = value }
     private lateinit var prefsStore: SessionPrefsStore
     private lateinit var runtimeStore: SessionRuntimeStore
     private var trafficSampler = TrafficSampler()
@@ -104,8 +110,9 @@ class MainActivity : ComponentActivity() {
             val granted =
                 result.resultCode == Activity.RESULT_OK &&
                     VpnService.prepare(this) == null
+            val pendingReason = pendingPermissionStarts.takeVpnReason(granted)
             if (granted) {
-                pendingVpnStartReason?.let { reason ->
+                pendingReason?.let { reason ->
                     resetTrafficSampling()
                     startingSinceMillis = System.currentTimeMillis()
                     startForegroundService(
@@ -119,14 +126,12 @@ class MainActivity : ComponentActivity() {
             } else {
                 startingSinceMillis = 0L
             }
-            pendingVpnStartReason = null
             onVpnPermissionResult?.invoke(granted)
         }
 
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            val pending = pendingNotificationStartReason
-            pendingNotificationStartReason = null
+            val pending = pendingPermissionStarts.takeNotificationReason()
             onNotificationPermissionResult?.invoke(granted, pending)
         }
 
@@ -142,10 +147,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        pendingVpnStartReason = savedInstanceState?.getString(STATE_PENDING_VPN_START_REASON)
-        pendingNotificationStartReason =
-            savedInstanceState?.getString(STATE_PENDING_NOTIFICATION_START_REASON)
-        startingSinceMillis = savedInstanceState?.getLong(STATE_STARTING_SINCE_MILLIS) ?: 0L
+        pendingPermissionStarts.restore(
+            vpnReason = savedInstanceState?.getString(STATE_PENDING_VPN_START_REASON),
+            notificationReason = savedInstanceState?.getString(STATE_PENDING_NOTIFICATION_START_REASON),
+            token = savedInstanceState?.getString(STATE_PENDING_START_GENERATION),
+        )
+        startingSinceMillis =
+            if (pendingPermissionStarts.isCurrent) {
+                savedInstanceState?.getLong(STATE_STARTING_SINCE_MILLIS) ?: 0L
+            } else {
+                0L
+            }
         prefsStore = SessionPrefsStore(this)
         runtimeStore = SessionRuntimeStore(this)
         lastImportedEventId = runtimeStore.clearedEventId()
@@ -185,6 +197,7 @@ class MainActivity : ComponentActivity() {
             var selectedSection by sessionViewModel.sectionHolder
             val scope = sessionViewModel.viewModelScope
             val cfstRunner = sessionViewModel.cfstRunner
+            val speedParameterInputs = sessionViewModel.speedParameterInputs
             // Application context for work launched in viewModelScope: it outlives
             // the Activity, so an in-flight run that spans a rotation never pins
             // the destroyed Activity in memory.
@@ -384,6 +397,15 @@ class MainActivity : ComponentActivity() {
                                 current.connectionPhase,
                                 runtimeStatus.phase,
                             )
+                        // A tile/notification STOP can arrive while the system consent
+                        // dialog is open, before any VPN worker has started.
+                        val cancelledPermissionStart =
+                            phase == ConnectionPhase.STARTING &&
+                                runtimeStatus.phase == ConnectionPhase.STOPPED &&
+                                startingSinceMillis == 0L && !pendingPermissionStarts.isCurrent
+                        if (cancelledPermissionStart) {
+                            phase = ConnectionPhase.STOPPED
+                        }
                         // STARTING without RUNNING for too long → failed start.
                         // Includes runtime stuck in STARTING (not only never-started STOPPED).
                         val now = System.currentTimeMillis()
@@ -433,10 +455,10 @@ class MainActivity : ComponentActivity() {
                         ) {
                             next =
                                 next.appendLog(
-                                    "启动超时或失败，请查看日志",
-                                    LogLevel.Error,
+                                    if (cancelledPermissionStart) "已取消待授权连接" else "启动超时或失败，请查看日志",
+                                    if (cancelledPermissionStart) LogLevel.Info else LogLevel.Error,
                                     LogSource.Session,
-                                    asNotice = true,
+                                    asNotice = !cancelledPermissionStart,
                                 )
                         }
                         // Import oldest-first so list stays newest-first after prepend.
@@ -705,6 +727,7 @@ class MainActivity : ComponentActivity() {
             }
 
             fun stopVpn() {
+                pendingPermissionStarts.cancel()
                 if (state.connectionPhase == ConnectionPhase.STOPPED ||
                     state.connectionPhase == ConnectionPhase.STOPPING
                 ) {
@@ -766,6 +789,12 @@ class MainActivity : ComponentActivity() {
             }
 
             fun applyProfileDraft(reconnect: Boolean) {
+                if (!SessionConfigurationActions.canApply(state.connectionPhase)) {
+                    update {
+                        it.appendLog("请等待当前连接操作完成后再应用配置", LogLevel.Warning, LogSource.Proxy, asNotice = true)
+                    }
+                    return
+                }
                 val draft = state.profileDraft.trim()
                 when (val gate = ProfileDraftGate.evaluate(draft)) {
                     is ProfileDraftGate.Result.Blocked -> {
@@ -815,11 +844,7 @@ class MainActivity : ComponentActivity() {
 
                 val wasRunning = state.runtime.running
                 update {
-                    it.copy(
-                        profileYaml = draft,
-                        profileDraft = draft,
-                        configPreview = "",
-                    ).appendLog(
+                    SessionConfigurationActions.applyProfile(it, draft).appendLog(
                         when {
                             reconnect && wasRunning -> "配置已应用，正在重新连接"
                             wasRunning -> "配置已保存，当前会话保持不变"
@@ -836,6 +861,12 @@ class MainActivity : ComponentActivity() {
             }
 
             fun applyNode(address: String, reconnect: Boolean) {
+                if (reconnect && !SessionConfigurationActions.canApply(state.connectionPhase)) {
+                    update {
+                        it.appendLog("请等待当前连接操作完成后再重连节点", LogLevel.Warning, LogSource.Node, asNotice = true)
+                    }
+                    return
+                }
                 val wasRunning = state.runtime.running
                 val normalized = Ipv6Address.normalize(address)
                 if (normalized == null || !Ipv6Address.isValid(normalized)) {
@@ -849,7 +880,7 @@ class MainActivity : ComponentActivity() {
                     return
                 }
                 update {
-                    it.rememberCandidate(normalized)
+                    SessionConfigurationActions.selectNode(it, normalized, reconnect)
                         .appendLog("已选择节点 $normalized", LogLevel.Success, LogSource.Node)
                 }
                 if (reconnect && wasRunning) {
@@ -879,20 +910,24 @@ class MainActivity : ComponentActivity() {
 
             fun applySpeedOutcome(result: CfstRunOutcome, installOk: Boolean, nodeTest: Boolean) {
                 val componentInfo =
-                    RuntimeComponentInfo(
-                        condition =
-                            if (installOk) {
-                                RuntimeComponentCondition.READY
-                            } else {
-                                RuntimeComponentCondition.ERROR
-                            },
-                        detail =
-                            if (installOk) {
-                                "APK 原生目录内 AArch64 ELF 已通过启动检查"
-                            } else {
-                                (result as? CfstRunOutcome.Failed)?.message ?: "CFST 安装失败"
-                            },
-                    )
+                    if (result is CfstRunOutcome.Cancelled && !installOk) {
+                        state.runtimeComponents.cfst
+                    } else {
+                        RuntimeComponentInfo(
+                            condition =
+                                if (installOk) {
+                                    RuntimeComponentCondition.READY
+                                } else {
+                                    RuntimeComponentCondition.ERROR
+                                },
+                            detail =
+                                if (installOk) {
+                                    "APK 原生目录内 AArch64 ELF 已通过启动检查"
+                                } else {
+                                    (result as? CfstRunOutcome.Failed)?.message ?: "CFST 安装失败"
+                                },
+                        )
+                    }
                 when (result) {
                     is CfstRunOutcome.Success -> {
                         update {
@@ -943,7 +978,7 @@ class MainActivity : ComponentActivity() {
                                         progressCurrent = 0,
                                         progressTotal = 0,
                                         message = "测速已取消",
-                                        binaryReady = installOk,
+                                        binaryReady = componentInfo.ready,
                                     ),
                             ).appendLog("测速已取消", LogLevel.Warning, LogSource.Node)
                         }
@@ -993,7 +1028,8 @@ class MainActivity : ComponentActivity() {
                     }
                     return
                 }
-                state.speedTest.parameterValidationMessage?.let { msg ->
+                (speedParameterInputs.validationMessage(state.speedTest.parameters)
+                    ?: state.speedTest.parameterValidationMessage)?.let { msg ->
                     update {
                         it.appendLog(msg, LogLevel.Error, LogSource.Node)
                     }
@@ -1002,6 +1038,7 @@ class MainActivity : ComponentActivity() {
                 val mode = state.speedTest.ipSourceMode
                 val baseParams = state.speedTest.parameters
                 val customFile = state.speedTest.customIpFilePath
+                val cancellation = sessionViewModel.beginSpeedTest()
                 update {
                     it.copy(
                         speedTest =
@@ -1017,8 +1054,16 @@ class MainActivity : ComponentActivity() {
                 scope.launch {
                     val outcome =
                         withContext(Dispatchers.IO) {
+                            var installOk = false
                             try {
+                                if (cancellation.isRequested) {
+                                    return@withContext CfstRunOutcome.Cancelled to installOk
+                                }
                                 val install = CfstInstaller.installIfNeeded(appContext)
+                                installOk = true
+                                if (cancellation.isRequested) {
+                                    return@withContext CfstRunOutcome.Cancelled to installOk
+                                }
                                 val parameters =
                                     baseParams.resolveForRun(
                                         mode = mode,
@@ -1036,11 +1081,17 @@ class MainActivity : ComponentActivity() {
                                         }
                                     },
                                     sslContext = appContext,
-                                ) to true
+                                    isCancellationRequested = { cancellation.isRequested },
+                                ) to installOk
                             } catch (error: Exception) {
-                                CfstRunOutcome.Failed(error.message ?: "CFST 安装失败") to false
+                                if (cancellation.isRequested) {
+                                    CfstRunOutcome.Cancelled to installOk
+                                } else {
+                                    CfstRunOutcome.Failed(error.message ?: "CFST 安装失败") to installOk
+                                }
                             }
                         }
+                    sessionViewModel.finishSpeedTest(cancellation)
                     applySpeedOutcome(outcome.first, outcome.second, nodeTest = false)
                 }
             }
@@ -1061,6 +1112,13 @@ class MainActivity : ComponentActivity() {
                             asNotice = true,
                         )
                     }
+                    return
+                }
+                speedParameterInputs.validationMessage(
+                    state.speedTest.parameters,
+                    currentNodeTest = true,
+                )?.let { message ->
+                    update { it.appendLog(message, LogLevel.Error, LogSource.Node, asNotice = true) }
                     return
                 }
                 val normalized = Ipv6Address.normalize(state.selectedAddress)
@@ -1087,6 +1145,7 @@ class MainActivity : ComponentActivity() {
                         }
                         return
                     }
+                val cancellation = sessionViewModel.beginSpeedTest()
                 update {
                     it.copy(
                         speedTest =
@@ -1106,8 +1165,16 @@ class MainActivity : ComponentActivity() {
                 scope.launch {
                     val outcome =
                         withContext(Dispatchers.IO) {
+                            var installOk = false
                             try {
+                                if (cancellation.isRequested) {
+                                    return@withContext CfstRunOutcome.Cancelled to installOk
+                                }
                                 val install = CfstInstaller.installIfNeeded(appContext)
+                                installOk = true
+                                if (cancellation.isRequested) {
+                                    return@withContext CfstRunOutcome.Cancelled to installOk
+                                }
                                 val work = CfstInstaller.workDir(appContext)
                                 cfstRunner.run(
                                     install.binary,
@@ -1119,17 +1186,23 @@ class MainActivity : ComponentActivity() {
                                         }
                                     },
                                     sslContext = appContext,
-                                ) to true
+                                    isCancellationRequested = { cancellation.isRequested },
+                                ) to installOk
                             } catch (error: Exception) {
-                                CfstRunOutcome.Failed(error.message ?: "CFST 安装失败") to false
+                                if (cancellation.isRequested) {
+                                    CfstRunOutcome.Cancelled to installOk
+                                } else {
+                                    CfstRunOutcome.Failed(error.message ?: "CFST 安装失败") to installOk
+                                }
                             }
                         }
+                    sessionViewModel.finishSpeedTest(cancellation)
                     applySpeedOutcome(outcome.first, outcome.second, nodeTest = true)
                 }
             }
 
             fun stopSpeedTest() {
-                val cancelled = cfstRunner.requestCancel()
+                val cancelled = sessionViewModel.cancelSpeedTest()
                 if (cancelled) {
                     logOnly {
                         it.copy(
@@ -1456,9 +1529,9 @@ class MainActivity : ComponentActivity() {
                 if (phase != ConnectionPhase.RUNNING || routingSessionKey == null) return
 
                 scope.launch {
-                    val ok =
+                    val result =
                         withContext(Dispatchers.IO) {
-                            ControllerClient.patchMode(
+                            ControllerClient.updateRoutingMode(
                                 host = "127.0.0.1",
                                 port = routingSessionKey.controllerPort,
                                 secret = routingSessionKey.secret,
@@ -1467,6 +1540,18 @@ class MainActivity : ComponentActivity() {
                         }
                     val sessionStillCurrent =
                         runtimeStore.load().sessionKey() == routingSessionKey
+                    if (sessionStillCurrent && state.routingMode == mode && result.restartRequired) {
+                        logOnly { current ->
+                            current.copy(routingModeSyncing = false)
+                                .appendLog(
+                                    "当前运行配置缺少代理或规则，正在按 ${mode.wire} 模式重新连接",
+                                    LogLevel.Info,
+                                    LogSource.Proxy,
+                                )
+                        }
+                        startVpn(reason = "routing-mode")
+                        return@launch
+                    }
                     logOnly { current ->
                         val next = current.copy(routingModeSyncing = false)
                         when {
@@ -1482,7 +1567,7 @@ class MainActivity : ComponentActivity() {
                                     LogLevel.Warning,
                                     LogSource.Proxy,
                                 )
-                            ok ->
+                            result.ok ->
                                 next.appendLog(
                                     "已切换运行中模式 → ${mode.wire}",
                                     LogLevel.Success,
@@ -1616,6 +1701,7 @@ class MainActivity : ComponentActivity() {
 
             ViaSixApp(
                 state = state,
+                speedParameterInputs = speedParameterInputs,
                 selectedSection = selectedSection,
                 onSectionChange = ::selectSection,
                 onProfileChange = { yaml ->
@@ -1650,6 +1736,7 @@ class MainActivity : ComponentActivity() {
                     update { it.copy(speedTest = it.speedTest.copy(customIpFilePath = path)) }
                 },
                 onResetSpeedParameters = {
+                    speedParameterInputs.reset()
                     update {
                         it.copy(
                             speedTest =
@@ -1775,6 +1862,7 @@ class MainActivity : ComponentActivity() {
                         }
                     } else {
                         prefsStore.clear()
+                        speedParameterInputs.reset()
                         val resetPrefs = prefsStore.load()
                         val currentRuntime = runtimeStore.load()
                         selectedSection = AppSection.OVERVIEW
@@ -1838,6 +1926,7 @@ class MainActivity : ComponentActivity() {
             STATE_PENDING_NOTIFICATION_START_REASON,
             pendingNotificationStartReason,
         )
+        outState.putString(STATE_PENDING_START_GENERATION, pendingPermissionStarts.generationToken)
         outState.putLong(STATE_STARTING_SINCE_MILLIS, startingSinceMillis)
         super.onSaveInstanceState(outState)
     }
@@ -1931,6 +2020,7 @@ class MainActivity : ComponentActivity() {
         private const val STATE_PENDING_VPN_START_REASON = "pendingVpnStartReason"
         private const val STATE_PENDING_NOTIFICATION_START_REASON =
             "pendingNotificationStartReason"
+        private const val STATE_PENDING_START_GENERATION = "pendingStartGeneration"
         private const val STATE_STARTING_SINCE_MILLIS = "startingSinceMillis"
     }
 }

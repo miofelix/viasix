@@ -113,6 +113,7 @@ fun ViaSixApp(
     onClearLogs: () -> Unit,
     onDismissNotice: () -> Unit,
     onClearSessionData: () -> Unit,
+    speedParameterInputs: SpeedParameterInputs = remember { SpeedParameterInputs() },
 ) {
     ViaSixTheme {
         val colors = LocalViaSixColors.current
@@ -203,6 +204,7 @@ fun ViaSixApp(
                             AppSection.NODES ->
                                 NodesScreen(
                                     state = state,
+                                    parameterInputs = speedParameterInputs,
                                     onSelectedAddressChange = onSelectedAddressChange,
                                     onApplyNode = onApplyNode,
                                     onRemoveCandidate = onRemoveCandidate,
