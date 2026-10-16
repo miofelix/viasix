@@ -27,7 +27,7 @@ class WorkerPoolSurfaceTest {
         assertTrue(engine.contains("ProtectedDatagramExchange.exchangeWithSocket"))
         assertTrue(engine.contains("inFlightIo.register"))
         assertTrue(engine.contains("rejectTcpSession(key, session)"))
-        assertTrue(engine.contains("direct DNS worker limit reached; drop"))
+        assertTrue(engine.contains("DNS worker limit reached; drop"))
         assertTrue(engine.contains("UDP ASSOCIATE worker limit reached; backoff"))
     }
 

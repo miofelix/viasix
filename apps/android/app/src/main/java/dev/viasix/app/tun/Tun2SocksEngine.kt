@@ -27,7 +27,8 @@ import kotlin.random.Random
  * Userspace IPv4/IPv6 forwarder for full-tunnel mode:
  * - TCP → SOCKS5 CONNECT (mihomo mixed port), except explicit protected-direct DNS/TCP
  * - UDP general → SOCKS5 UDP ASSOCIATE **per local client endpoint** (correct demux)
- * - TCP/UDP port 53 → SOCKS5 by default, or protected direct sockets when requested
+ * - UDP port 53 → DNS over SOCKS5 TCP by default (also works with TCP-only proxies)
+ * - TCP port 53 → SOCKS5, or protected direct sockets when requested
  *
  * ASSOCIATE open runs on the worker pool (never blocks the TUN reader). Failures are
  * negative-cached so retries do not stall packet processing.
@@ -942,23 +943,28 @@ class Tun2SocksEngine(
             buffer.position(pos)
         }
 
-        // Explicit direct DNS keeps per-query protected sockets for concurrent demux.
-        // Proxy DNS falls through to the per-client SOCKS5 UDP ASSOCIATE path below.
-        if (DnsSettingsPolicy.shouldUseProtectedDirect(udp.destPort, dnsRoutingMode)) {
+        // DNS uses a bounded per-query exchange. Proxy mode bridges UDP to TCP
+        // because a SOCKS UDP association can succeed even when the selected
+        // upstream node has udp:false, silently discarding every DNS query.
+        if (udp.destPort == 53) {
             val permit = directDnsGate.tryAcquire()
             if (permit == null) {
-                Log.w(TAG, "direct DNS query limit reached; drop")
+                Log.w(TAG, "DNS query limit reached; drop")
                 return
             }
             if (!ioWorkers.execute {
                 try {
-                    forwardDnsDirect(clientIp, udp.sourcePort, remoteIp, payload, ipv6)
+                    if (dnsRoutingMode == DnsRoutingMode.DIRECT) {
+                        forwardDnsDirect(clientIp, udp.sourcePort, remoteIp, payload, ipv6)
+                    } else {
+                        forwardDnsProxy(clientIp, udp.sourcePort, remoteIp, payload, ipv6)
+                    }
                 } finally {
                     permit.close()
                 }
             }) {
                 permit.close()
-                Log.w(TAG, "direct DNS worker limit reached; drop")
+                Log.w(TAG, "DNS worker limit reached; drop")
             }
             return
         }
@@ -1204,6 +1210,39 @@ class Tun2SocksEngine(
             enqueuePacket(packet)
         } catch (error: Exception) {
             if (running.get()) Log.w(TAG, "DNS direct forward failed: ${error.message}")
+        } finally {
+            inFlightIo.unregister(socket)
+        }
+    }
+
+    private fun forwardDnsProxy(
+        clientIp: InetAddress,
+        clientPort: Int,
+        dnsServer: InetAddress,
+        payload: ByteArray,
+        ipv6: Boolean,
+    ) {
+        val socket = Socket()
+        if (!inFlightIo.register(socket)) return
+        try {
+            val bytes =
+                ProxyDnsExchange.exchangeWithSocket(
+                    socket = socket,
+                    proxyHost = socksHost,
+                    proxyPort = socksPort,
+                    dnsServer = if (dnsServer.isAnyLocalAddress) dnsUpstream else dnsServer,
+                    request = payload,
+                    maxUdpPayloadBytes = mtu - (if (ipv6) Packet.IP6_HEADER_SIZE else Packet.IP4_HEADER_SIZE) - Packet.UDP_HEADER_SIZE,
+                )
+            enqueuePacket(
+                if (ipv6) {
+                    Packet.buildIp6Udp(dnsServer, clientIp, 53, clientPort, bytes)
+                } else {
+                    Packet.buildIp4Udp(dnsServer, clientIp, 53, clientPort, bytes)
+                },
+            )
+        } catch (error: Exception) {
+            if (running.get()) Log.w(TAG, "DNS proxy TCP forward failed: ${error.message}")
         } finally {
             inFlightIo.unregister(socket)
         }

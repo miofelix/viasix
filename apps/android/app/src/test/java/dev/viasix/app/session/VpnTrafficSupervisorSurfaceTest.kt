@@ -18,7 +18,7 @@ class VpnTrafficSupervisorSurfaceTest {
         assertTrue(service.contains("val generation = trafficLoopGate.next()"))
         assertTrue(service.contains("val sampler = TrafficSampler(maxHistory = 30)"))
         assertTrue(service.contains("while (trafficLoopGate.isCurrent(generation))"))
-        assertTrue(service.contains("if (!trafficLoopGate.claim(generation)) break"))
+        assertTrue(service.contains("trafficLoopGate.claimAndRun(generation, runtimeStackLock)"))
         assertTrue(service.contains("trafficLoopGate.invalidate()"))
         assertFalse(service.contains("trafficLoopRunning.set(true)"))
         assertFalse(service.contains("private val trafficSampler"))

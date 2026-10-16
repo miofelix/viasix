@@ -85,6 +85,10 @@ class ViaSixVpnService : VpnService() {
     private val startRequests = LatestRequestGate<StartRequest>()
     private val shutdownGate = ShutdownRestartGate<StartRequest>()
     private val trafficLoopGate = GenerationGate()
+    // A stop marks shutdown immediately, then waits for any in-flight startup to
+    // publish its resources and observe cancellation before reclaiming them.
+    private val runtimeStackLock = Any()
+    private val requestDispatchLock = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
 
     @Volatile
@@ -164,6 +168,7 @@ class ViaSixVpnService : VpnService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            dev.viasix.app.session.PermissionStartCancellation.shared.cancel()
             appendEvent("用户停止会话", "info")
             shutdownAll(
                 reason = "stopped by user",
@@ -256,14 +261,16 @@ class ViaSixVpnService : VpnService() {
             "info",
         )
 
-        if (shutdownGate.submit(request) == ShutdownSubmission.QUEUED) {
-            appendEvent("关停进行中，已保留最新启动请求", "info")
-            return START_STICKY
-        }
+        synchronized(requestDispatchLock) {
+            if (shutdownGate.submit(request) == ShutdownSubmission.QUEUED) {
+                appendEvent("关停进行中，已保留最新启动请求", "info")
+                return START_STICKY
+            }
 
-        if (!startRequests.submit(request)) {
-            appendEvent("已有启动任务进行中，已合并为最新请求", "info")
-            return START_STICKY
+            if (!startRequests.submit(request)) {
+                appendEvent("已有启动任务进行中，已合并为最新请求", "info")
+                return START_STICKY
+            }
         }
         launchStartupWorker()
         return START_STICKY
@@ -271,38 +278,41 @@ class ViaSixVpnService : VpnService() {
 
     private fun launchStartupWorker() {
         thread(name = "viasix-vpn-start", isDaemon = true) {
-            while (!shutdownGate.isShuttingDown()) {
+            while (true) {
                 val request = startRequests.takeNext() ?: break
                 try {
-                    requireStartupActive("before restart cleanup")
-                    writeRuntimeStatus(
-                        phase = ConnectionPhase.STARTING,
-                        healthMessage = "starting",
-                        secret = "",
-                        version = null,
-                        startedAt = null,
-                    )
-                    // Tear down any previous stack before applying new parameters
-                    // (node apply / reconnect path).
-                    stopStackOnly("restart for ${request.reason}")
-                    requireStartupActive("after restart cleanup")
-                    startStack(
-                        request.profile,
-                        request.selectedIp,
-                        request.mode,
-                        request.fullTunnel,
-                        request.vpnMtuInput,
-                        request.vpnMetered,
-                        request.bypassLocalNetwork,
-                        request.ipv6RoutingMode,
-                        request.dnsRoutingMode,
-                        request.dnsServerInput,
-                        request.appRoutingMode,
-                        request.selectedAppPackages,
-                    )
+                    synchronized(runtimeStackLock) {
+                        requireStartupActive("before restart cleanup")
+                        writeRuntimeStatus(
+                            phase = ConnectionPhase.STARTING,
+                            healthMessage = "starting",
+                            secret = "",
+                            version = null,
+                            startedAt = null,
+                        )
+                        // Tear down any previous stack before applying new parameters
+                        // (node apply / reconnect path).
+                        stopStackOnly("restart for ${request.reason}")
+                        requireStartupActive("after restart cleanup")
+                        startStack(
+                            request.profile,
+                            request.selectedIp,
+                            request.mode,
+                            request.fullTunnel,
+                            request.vpnMtuInput,
+                            request.vpnMetered,
+                            request.bypassLocalNetwork,
+                            request.ipv6RoutingMode,
+                            request.dnsRoutingMode,
+                            request.dnsServerInput,
+                            request.appRoutingMode,
+                            request.selectedAppPackages,
+                        )
+                    }
                 } catch (error: VpnStartupCancelledException) {
                     Log.i(TAG, error.message.orEmpty())
-                    break
+                    // takeNext must retire the worker even after cancellation;
+                    // otherwise every future request remains queued forever.
                 } catch (error: Exception) {
                     if (shutdownGate.isShuttingDown()) {
                         Log.i(TAG, "startup stopped during ${error.javaClass.simpleName}")
@@ -312,7 +322,6 @@ class ViaSixVpnService : VpnService() {
                         updateNotification("Start failed: ${error.message}")
                         shutdownAll("start failed", stopService = true)
                     }
-                    break
                 }
             }
         }
@@ -356,7 +365,9 @@ class ViaSixVpnService : VpnService() {
         val secret = UUID.randomUUID().toString().replace("-", "")
         val options =
             ProjectOptions(
-                routingMode = mode,
+                // Keep managed rules installed so a later GLOBAL → RULE switch
+                // cannot fall back to DIRECT merely because the rules are absent.
+                routingMode = if (mode == RoutingMode.GLOBAL) RoutingMode.RULE else mode,
                 selectedAddress = if (mode == RoutingMode.DIRECT) null else selectedIp,
                 listenAddress = "127.0.0.1",
                 mixedPort = MIXED_PORT,
@@ -392,6 +403,24 @@ class ViaSixVpnService : VpnService() {
             appendEvent("控制器尚未就绪：${health.message}", "warning")
         } else {
             appendEvent("控制器就绪 ${health.version ?: ""}".trim(), "success")
+        }
+
+        if (mode == RoutingMode.GLOBAL) {
+            // /version can answer before mihomo has installed its proxies. Wait
+            // for the actual selector instead of publishing a default DIRECT route.
+            val selectionDeadline = System.nanoTime() + 3_000_000_000L
+            var selected = false
+            while (!selected && System.nanoTime() < selectionDeadline) {
+                requireStartupActive("GLOBAL proxy selection")
+                selected = ControllerClient.updateRoutingMode(
+                    "127.0.0.1", CONTROLLER_PORT, secret, RoutingMode.GLOBAL.wire,
+                    timeoutMs = 1_000,
+                ).ok
+                if (!selected) ControllerClient.sleepQuietly(100)
+            }
+            check(selected) { "Could not select the managed proxy for GLOBAL mode" }
+            requireStartupActive("after GLOBAL proxy selection")
+            appendEvent("全局模式已选择当前代理节点", "success")
         }
 
         val builder =
@@ -634,14 +663,15 @@ class ViaSixVpnService : VpnService() {
                                 tunnelRunning = tunEngine?.isRunning == true,
                             )
                         if (failure != null) {
-                            if (!trafficLoopGate.claim(generation)) break
-                            val component =
-                                when (failure) {
-                                    RuntimeStackFailure.MIHOMO_EXITED -> "mihomo"
-                                    RuntimeStackFailure.TUNNEL_EXITED -> "TUN 转发"
-                                }
-                            appendEvent("$component 异常退出，正在结束会话", "error")
-                            shutdownAll("$component exited unexpectedly", stopService = true)
+                            trafficLoopGate.claimAndRun(generation, runtimeStackLock) {
+                                val component =
+                                    when (failure) {
+                                        RuntimeStackFailure.MIHOMO_EXITED -> "mihomo"
+                                        RuntimeStackFailure.TUNNEL_EXITED -> "TUN 转发"
+                                    }
+                                appendEvent("$component 异常退出，正在结束会话", "error")
+                                shutdownAll("$component exited unexpectedly", stopService = true)
+                            }
                             break
                         }
                         try {
@@ -734,8 +764,10 @@ class ViaSixVpnService : VpnService() {
         stopService: Boolean,
         asynchronous: Boolean = false,
     ) {
-        if (!shutdownGate.beginShutdown()) return
-        startRequests.cancelPending()
+        synchronized(requestDispatchLock) {
+            if (!shutdownGate.beginShutdown()) return
+            startRequests.cancelPending()
+        }
         Log.i(TAG, "shutdown: $reason")
         writeRuntimeStatus(
             phase = ConnectionPhase.STOPPING,
@@ -745,24 +777,31 @@ class ViaSixVpnService : VpnService() {
             startedAt = null,
         )
         val teardown = {
-            stopStackOnly(reason)
-            writeRuntimeStatus(
-                phase = ConnectionPhase.STOPPED,
-                healthMessage = "stopped",
-                secret = "",
-                version = null,
-                startedAt = null,
-            )
-            appendEvent("会话结束：$reason", "info")
-            val restart = shutdownGate.completeTeardown()
-            if (restart != null) {
-                appendEvent("关停完成，正在执行最新启动请求", "info")
-                if (startRequests.submit(restart)) launchStartupWorker()
-            } else if (stopService) {
-                mainHandler.post {
-                    if (!shutdownGate.commitServiceStop()) return@post
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
+            synchronized(runtimeStackLock) {
+                stopStackOnly(reason)
+                writeRuntimeStatus(
+                    phase = ConnectionPhase.STOPPED,
+                    healthMessage = "stopped",
+                    secret = "",
+                    version = null,
+                    startedAt = null,
+                )
+                appendEvent("会话结束：$reason", "info")
+                val launchRestart =
+                    synchronized(requestDispatchLock) {
+                        shutdownGate.completeTeardown()?.let { restart ->
+                            appendEvent("关停完成，正在执行最新启动请求", "info")
+                            startRequests.submit(restart)
+                        }
+                    }
+                if (launchRestart == true) {
+                    launchStartupWorker()
+                } else if (launchRestart == null && stopService) {
+                    mainHandler.post {
+                        if (!shutdownGate.commitServiceStop()) return@post
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                    }
                 }
             }
         }

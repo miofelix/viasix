@@ -1,6 +1,5 @@
 package dev.viasix.app.session
 
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -39,7 +38,8 @@ class DnsRoutingSurfaceTest {
         assertTrue(engine.contains("DnsSettingsPolicy.shouldUseProtectedDirect"))
         assertTrue(engine.contains("ProtectedSocketConnector.connect"))
         assertTrue(engine.contains("targetHost = dnsUpstream"))
-        assertFalse(engine.contains("if (udp.destPort == 53)"))
+        assertTrue(engine.contains("ProxyDnsExchange.exchangeWithSocket"))
+        assertTrue(engine.contains("forwardDnsProxy(clientIp"))
         assertTrue(settings.contains("DNS 路由"))
         assertTrue(settings.contains("DNS 服务器（数字 IP）"))
         assertTrue(settings.contains("DNS 可经代理或直连"))

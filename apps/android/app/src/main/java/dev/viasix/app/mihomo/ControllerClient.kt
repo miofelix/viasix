@@ -53,6 +53,11 @@ data class ProxyDelayResult(
     val message: String,
 )
 
+data class RoutingModeUpdate(
+    val ok: Boolean,
+    val restartRequired: Boolean = false,
+)
+
 /**
  * Mihomo external-controller HTTP client: health, traffic totals/rates, memory,
  * mode patch, and proxy delay tests.
@@ -181,14 +186,98 @@ object ControllerClient {
     ): Boolean {
         return try {
             val conn = open("http://$host:$port/configs", secret, timeoutMs, method = "PATCH")
+            try {
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.outputStream.use { out ->
+                    out.write("""{"mode":"$mode"}""".toByteArray(StandardCharsets.UTF_8))
+                }
+                conn.responseCode in 200..299
+            } finally {
+                conn.disconnect()
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * A successful PATCH only changes mihomo's mode; it does not install missing
+     * proxies/rules or select the managed node in the built-in GLOBAL selector.
+     */
+    fun updateRoutingMode(
+        host: String,
+        port: Int,
+        secret: String,
+        mode: String,
+        timeoutMs: Int = 3000,
+    ): RoutingModeUpdate =
+        try {
+            require(mode in setOf("direct", "rule", "global"))
+            if (mode != "direct") {
+                val global = readJson("http://$host:$port/proxies/GLOBAL", secret, timeoutMs)
+                val candidates = global.getJSONArray("all")
+                // Android's projection contains exactly one managed proxy.
+                val managed = (0 until candidates.length())
+                    .map { candidates.getString(it) }
+                    .filter { it != "DIRECT" && it != "REJECT" }
+                    .singleOrNull()
+                if (managed == null) {
+                    RoutingModeUpdate(ok = false, restartRequired = true)
+                } else if (mode == "rule" && !hasManagedRules(host, port, secret, managed, timeoutMs)) {
+                    RoutingModeUpdate(ok = false, restartRequired = true)
+                } else if (mode == "global" && !selectGlobalProxy(host, port, secret, managed, timeoutMs)) {
+                    RoutingModeUpdate(ok = false)
+                } else {
+                    RoutingModeUpdate(ok = patchMode(host, port, secret, mode, timeoutMs))
+                }
+            } else {
+                RoutingModeUpdate(ok = patchMode(host, port, secret, mode, timeoutMs))
+            }
+        } catch (_: Exception) {
+            RoutingModeUpdate(ok = false)
+        }
+
+    private fun hasManagedRules(
+        host: String,
+        port: Int,
+        secret: String,
+        managed: String,
+        timeoutMs: Int,
+    ): Boolean {
+        val rules = readJson("http://$host:$port/rules", secret, timeoutMs).getJSONArray("rules")
+        return (0 until rules.length()).any { rules.getJSONObject(it).optString("proxy") == managed }
+    }
+
+    private fun selectGlobalProxy(
+        host: String,
+        port: Int,
+        secret: String,
+        managed: String,
+        timeoutMs: Int,
+    ): Boolean {
+        val path = "http://$host:$port/proxies/GLOBAL"
+        val conn = open(path, secret, timeoutMs, method = "PUT")
+        try {
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
             conn.outputStream.use { out ->
-                out.write("""{"mode":"$mode"}""".toByteArray(StandardCharsets.UTF_8))
+                out.write(JSONObject().put("name", managed).toString().toByteArray(StandardCharsets.UTF_8))
             }
-            conn.responseCode in 200..299
-        } catch (_: Exception) {
-            false
+            if (conn.responseCode !in 200..299) return false
+        } finally {
+            conn.disconnect()
+        }
+        return readJson(path, secret, timeoutMs).optString("now") == managed
+    }
+
+    private fun readJson(url: String, secret: String, timeoutMs: Int): JSONObject {
+        val conn = open(url, secret, timeoutMs)
+        try {
+            check(conn.responseCode in 200..299) { "Controller HTTP ${conn.responseCode}" }
+            return JSONObject(readBody(conn))
+        } finally {
+            conn.disconnect()
         }
     }
 

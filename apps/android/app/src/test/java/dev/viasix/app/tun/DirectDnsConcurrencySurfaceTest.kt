@@ -17,7 +17,7 @@ class DirectDnsConcurrencySurfaceTest {
         assertTrue(engine.contains("directDnsGate.tryAcquire()"))
         assertTrue(engine.contains("permit.close()"))
         assertTrue(engine.contains("RejectedExecutionException"))
-        assertTrue(engine.contains("direct DNS query limit reached; drop"))
+        assertTrue(engine.contains("DNS query limit reached; drop"))
     }
 
     private fun resolve(vararg paths: String): File =

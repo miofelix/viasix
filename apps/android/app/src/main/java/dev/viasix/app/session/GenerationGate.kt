@@ -16,4 +16,15 @@ internal class GenerationGate {
 
     /** Atomically reserves the terminal action for [generation] and invalidates it. */
     fun claim(generation: Long): Boolean = current.compareAndSet(generation, generation + 1L)
+
+    /** Rechecks ownership under the same lock that protects replacement resources. */
+    fun claimAndRun(generation: Long, lifecycleLock: Any, action: () -> Unit): Boolean =
+        synchronized(lifecycleLock) {
+            if (!claim(generation)) {
+                false
+            } else {
+                action()
+                true
+            }
+        }
 }
