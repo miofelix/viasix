@@ -38,7 +38,7 @@ help:
 	@echo "  make windows-test      - Rust contract projection tests (Windows host crate)"
 	@echo "  make windows-build-docs - verify Windows release docs exist"
 	@echo "  make android-skeleton  - verify Android app tree"
-	@echo "  make android-test      - JVM contract projection tests (:core)"
+	@echo "  make android-test      - Android JVM tests (:core + :app)"
 	@echo "  make android-assemble  - assemble debug APK (requires Android SDK)"
 	@echo "  make android-assemble-release - signed release APK (needs signing/)"
 	@echo "  make projection-test   - all platforms contracts fixtures only"
@@ -117,14 +117,14 @@ android-skeleton:
 	@echo "android skeleton OK"
 
 android-test:
-	cd "$(ANDROID_DIR)" && gradle :core:test :app:test --no-daemon
+	cd "$(ANDROID_DIR)" && ./gradlew :core:test :app:test --no-daemon
 
 android-assemble:
 	@test -s "$(ANDROID_DIR)/app/src/main/jniLibs/arm64-v8a/libmihomo.so" || \
 		(echo "error: missing libmihomo.so — run: cd apps/android && node scripts/fetch-mihomo.mjs" >&2; exit 1)
 	@test -s "$(ANDROID_DIR)/app/src/main/jniLibs/arm64-v8a/libcfst.so" || \
 		(echo "error: missing libcfst.so — run: cd apps/android && node scripts/fetch-cfst.mjs" >&2; exit 1)
-	cd "$(ANDROID_DIR)" && gradle :app:assembleDebug --no-daemon
+	cd "$(ANDROID_DIR)" && ./gradlew :app:assembleDebug --no-daemon
 
 android-assemble-release:
 	@test -s "$(ANDROID_DIR)/app/src/main/jniLibs/arm64-v8a/libmihomo.so" || \
@@ -133,7 +133,7 @@ android-assemble-release:
 		(echo "error: missing libcfst.so — run: cd apps/android && node scripts/fetch-cfst.mjs" >&2; exit 1)
 	@test -f signing/android/keystore.properties || \
 		(echo "error: missing signing/android/keystore.properties — see signing/README.md" >&2; exit 1)
-	cd "$(ANDROID_DIR)" && gradle :app:assembleRelease --no-daemon
+	cd "$(ANDROID_DIR)" && ./gradlew :app:assembleRelease --no-daemon
 
 shared-test:
 	cargo test --manifest-path packages/viasix-mihomo-config/Cargo.toml
