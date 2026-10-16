@@ -1,13 +1,15 @@
 package dev.viasix.app.net
 
 import java.net.HttpURLConnection
+import java.net.Inet6Address
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.URL
 import java.nio.charset.StandardCharsets
 
 enum class ExitIPDetectionMode(val wire: String, val label: String) {
-    /** Prefer IPv6 (ViaSix product default), then dual-stack / IPv4 fallbacks. */
+    /** Use the configured detection service, then try explicit address-family fallbacks. */
     AUTOMATIC("automatic", "自动"),
     IPV4("ipv4", "IPv4"),
     IPV6("ipv6", "IPv6");
@@ -59,20 +61,27 @@ object ExitIPRoutePolicy {
         if (running) ExitIPRoute.MIXED_PROXY else ExitIPRoute.DIRECT
 }
 
+/** Injectable transport preserves the same route for every primary, fallback and geo request. */
+fun interface ExitIPRequest {
+    fun get(url: String, timeoutMs: Int, proxy: ExitIPProxy?): String
+}
+
 /**
- * Exit IP detection aligned with macOS endpoints and parsers.
+ * Detects the outbound address independently of the proxy server's address family.
  * JSON parsing is intentionally dependency-light so unit tests run on the JVM
  * without Android's stubbed org.json.
  */
 object ExitIPDetector {
     const val DEFAULT_ENDPOINT = "https://api.myip.la/cn?json"
-    const val IPV4_ENDPOINT = "https://api-ipv4.ip.sb/ip"
-    const val IPV6_ENDPOINT = "https://api-ipv6.ip.sb/ip"
+    const val IPV4_ENDPOINT = "https://v4.ident.me"
+    const val IPV4_FALLBACK_ENDPOINT = "https://checkip.amazonaws.com"
+    const val IPV6_ENDPOINT = "https://v6.ident.me"
     const val GEO_ENDPOINT = "https://ipwho.is"
+    private const val GEO_TIMEOUT_CAP_MS = 1500
 
     fun endpointFor(mode: ExitIPDetectionMode, automaticEndpoint: String): String =
         when (mode) {
-            ExitIPDetectionMode.AUTOMATIC -> automaticEndpoint.ifBlank { DEFAULT_ENDPOINT }
+            ExitIPDetectionMode.AUTOMATIC -> automaticEndpoint.trim().ifBlank { DEFAULT_ENDPOINT }
             ExitIPDetectionMode.IPV4 -> IPV4_ENDPOINT
             ExitIPDetectionMode.IPV6 -> IPV6_ENDPOINT
         }
@@ -80,17 +89,16 @@ object ExitIPDetector {
     /**
      * Detection order for a user-selected mode.
      *
-     * **Automatic** tries IPv6 first: ViaSix sessions inject an IPv6 primary server, and
-     * dual-stack endpoints (e.g. myip.la) commonly answer over IPv4 when the HTTP client
-     * prefers A records — which made “自动” look like “only IPv4” after connect.
+     * An IPv6 connection to a proxy does not imply an IPv6 outbound connection.
+     * Automatic respects the configured endpoint, then tries IPv4 and IPv6 fallbacks.
      */
     fun detectionAttemptModes(mode: ExitIPDetectionMode): List<ExitIPDetectionMode> =
         when (mode) {
             ExitIPDetectionMode.AUTOMATIC ->
                 listOf(
-                    ExitIPDetectionMode.IPV6,
                     ExitIPDetectionMode.AUTOMATIC,
                     ExitIPDetectionMode.IPV4,
+                    ExitIPDetectionMode.IPV6,
                 )
             ExitIPDetectionMode.IPV4,
             ExitIPDetectionMode.IPV6,
@@ -103,29 +111,41 @@ object ExitIPDetector {
         timeoutMs: Int = 8000,
         enrich: Boolean = true,
         proxy: ExitIPProxy? = null,
+        request: ExitIPRequest = ExitIPRequest(::httpGet),
     ): Result<ExitIPInfo> {
+        require(timeoutMs > 0) { "timeout must be positive" }
         var lastError: Exception? = null
         for (attempt in detectionAttemptModes(mode)) {
-            try {
-                val endpoint = endpointFor(attempt, automaticEndpoint)
-                val raw = httpGet(endpoint, timeoutMs, proxy)
-                var info =
-                    validateExpectedFamily(
-                        mode = attempt,
-                        info = parsePrimary(raw).copy(route = ExitIPRoutePolicy.routeFor(proxy)),
-                    )
-                // Dual-stack “automatic” endpoints can still return IPv4; if the user chose
-                // automatic and we are on that fallback step, accept either family.
-                if (enrich) {
-                    info = enrichWithGeo(info, timeoutMs, proxy) ?: info
+            // At most five primary requests: custom/default, two IPv4 services, IPv6.
+            val endpoints =
+                when (attempt) {
+                    ExitIPDetectionMode.AUTOMATIC ->
+                        listOf(endpointFor(attempt, automaticEndpoint), DEFAULT_ENDPOINT).distinct()
+                    ExitIPDetectionMode.IPV4 -> listOf(IPV4_ENDPOINT, IPV4_FALLBACK_ENDPOINT)
+                    ExitIPDetectionMode.IPV6 -> listOf(IPV6_ENDPOINT)
                 }
-                return Result.success(info)
-            } catch (error: Exception) {
-                lastError = error
+            for (endpoint in endpoints) {
+                try {
+                    val raw = request.get(endpoint, timeoutMs, proxy)
+                    var info =
+                        validateExpectedFamily(
+                            mode = attempt,
+                            info = parsePrimary(raw).copy(route = ExitIPRoutePolicy.routeFor(proxy)),
+                        )
+                    if (enrich && info.location.isBlank()) {
+                        info = enrichWithGeo(info, minOf(timeoutMs, GEO_TIMEOUT_CAP_MS), proxy, request) ?: info
+                    }
+                    return Result.success(info)
+                } catch (error: Exception) {
+                    lastError = error
+                }
             }
         }
         return Result.failure(
-            lastError ?: IllegalStateException("出口 IP 检测失败"),
+            IllegalStateException(
+                "${mode.label}出口 IP 检测失败：${lastError?.message ?: "检测服务不可用"}",
+                lastError,
+            ),
         )
     }
 
@@ -150,10 +170,11 @@ object ExitIPDetector {
                     .filter { it.isNotBlank() }
                     .distinct()
                     .joinToString(" · ")
+            val normalizedIp = normalizeIp(ip)
             return ExitIPInfo(
-                ip = normalizeIp(ip),
+                ip = normalizedIp,
                 location = location,
-                family = addressFamily(ip),
+                family = addressFamily(normalizedIp),
             )
         }
         val ip = normalizeIp(trimmed.lineSequence().first().trim())
@@ -180,10 +201,11 @@ object ExitIPDetector {
         info: ExitIPInfo,
         timeoutMs: Int,
         proxy: ExitIPProxy?,
+        request: ExitIPRequest,
     ): ExitIPInfo? {
         return try {
             val url = "$GEO_ENDPOINT/${info.ip}?lang=zh-CN"
-            val body = httpGet(url, timeoutMs, proxy)
+            val body = request.get(url, timeoutMs, proxy)
             if (body.contains("\"success\":false")) return null
             val location =
                 listOfNotNull(
@@ -262,9 +284,29 @@ object ExitIPDetector {
             value = value.substring(1, value.length - 1)
         }
         if (value.isEmpty()) throw IllegalArgumentException("empty ip")
+        addressFamily(value)
         return value
     }
 
-    fun addressFamily(ip: String): String =
-        if (ip.contains(':')) "IPv6" else "IPv4"
+    fun addressFamily(ip: String): String {
+        if (ip.contains(':')) {
+            // A literal-only character check prevents DNS lookup of arbitrary response text.
+            if (ip.any { it !in "0123456789abcdefABCDEF:." }) {
+                throw IllegalArgumentException("出口 IP 服务返回了无效地址")
+            }
+            val address = runCatching { InetAddress.getByName(ip) }.getOrNull()
+            if (address is Inet6Address) return "IPv6"
+        } else {
+            val octets = ip.split('.')
+            if (octets.size == 4 && octets.all { octet ->
+                    octet.isNotEmpty() && octet.all { it in '0'..'9' } &&
+                        (octet.length == 1 || !octet.startsWith('0')) &&
+                        octet.toIntOrNull() in 0..255
+                }
+            ) {
+                return "IPv4"
+            }
+        }
+        throw IllegalArgumentException("出口 IP 服务返回了无效地址")
+    }
 }

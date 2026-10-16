@@ -29,7 +29,7 @@ class ExitIPProxySurfaceTest {
             ).readText()
 
         assertTrue(detector.contains("URL(url).openConnection(proxy.asJavaProxy())"))
-        assertTrue(detector.contains("enrichWithGeo(info, timeoutMs, proxy)"))
+        assertTrue(detector.contains("request.get(endpoint, timeoutMs, proxy)"))
         assertTrue(detector.contains("validateExpectedFamily"))
         assertTrue(detector.contains("detectionAttemptModes"))
         assertTrue(detector.contains("ExitIPDetectionMode.IPV6"))
