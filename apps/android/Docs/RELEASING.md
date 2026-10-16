@@ -22,9 +22,9 @@
 
 - [ ] 已 bump `versionName` / `versionCode`
 - [ ] `CHANGELOG.md` 已写入 `## [android/X.Y.Z]`
-- [ ] `node scripts/fetch-mihomo.mjs` 与 `fetch-cfst.mjs` 已准备 arm64 原生库
-- [ ] `gradle :core:test :app:test` 通过
-- [ ] `gradle :app:assembleRelease` 产出已签名 APK
+- [ ] 已审核并更新安装包内提交的 arm64 原生库（需要更新时运行 fetch 脚本）
+- [ ] `./gradlew :core:test :app:test` 通过
+- [ ] `./gradlew :app:assembleRelease` 产出已签名 APK
 - [ ] 校验 APK 签名与版本：
 
 ```bash
@@ -38,8 +38,8 @@ apksigner verify --print-certs app-release.apk
 cd apps/android
 node scripts/fetch-mihomo.mjs
 node scripts/fetch-cfst.mjs
-gradle :core:test :app:test --no-daemon
-gradle :app:assembleRelease --no-daemon
+./gradlew :core:test :app:test --no-daemon
+./gradlew :app:assembleRelease --no-daemon
 ```
 
 发布文件名规范：`ViaSix-<version>-<platform>-<arch>.<ext>`
