@@ -5,6 +5,7 @@ import dev.viasix.app.mihomo.TrafficSnapshot
 import dev.viasix.app.net.ExitIPDetectionMode
 import dev.viasix.app.net.ExitIPInfo
 import dev.viasix.app.prefs.SessionPrefs
+import dev.viasix.app.prefs.DefaultProfile
 import dev.viasix.app.runtime.RuntimeComponentsState
 import dev.viasix.app.session.AppRoutingMode
 import dev.viasix.app.session.AppRoutingPolicy
@@ -145,7 +146,7 @@ data class SessionUiState(
     val profileYaml: String = "",
     /** Editable, persisted draft; never used by the runtime until explicitly applied. */
     val profileDraft: String = "",
-    val selectedAddress: String = "2001:db8::1",
+    val selectedAddress: String = DefaultProfile.selectedAddress,
     val candidateAddresses: List<String> = emptyList(),
     val routingMode: RoutingMode = RoutingMode.RULE,
     val routingModeSyncing: Boolean = false,
@@ -223,22 +224,12 @@ data class SessionUiState(
         )
 
     companion object {
-        val defaultProfile =
-            """
-            proxies:
-              - name: My VLESS
-                type: vless
-                server: origin.example.com
-                port: 443
-                uuid: 11111111-1111-4111-1111-111111111111
-            x-viasix:
-              version: 1
-              primary-server: selected-ip
-            """.trimIndent()
+        val defaultProfile: String
+            get() = DefaultProfile.yaml
 
         fun fromPrefs(prefs: SessionPrefs): SessionUiState {
             val profile = prefs.profileYaml.ifBlank { defaultProfile }
-            val selected = prefs.selectedAddress.ifBlank { "2001:db8::1" }
+            val selected = prefs.selectedAddress.ifBlank { DefaultProfile.selectedAddress }
             val candidates =
                 (listOf(selected) + prefs.candidateAddresses)
                     .mapNotNull { Ipv6Address.normalize(it) }

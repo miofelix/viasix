@@ -1,0 +1,19 @@
+x-viasix:
+  version: 1
+  primary-server: selected-ip
+proxies:
+  - name: ViaSix Cloudflare Pages
+    type: vless
+    port: 443
+    uuid: "3ceaa220-c0b3-41e7-9af5-d90fd8a9509d"
+    encryption: none
+    udp: false
+    tls: true
+    servername: "viasix.miofelix.com"
+    client-fingerprint: chrome
+    skip-cert-verify: false
+    network: ws
+    ws-opts:
+      path: "/?ed=2560"
+      headers:
+        Host: "viasix.miofelix.com"

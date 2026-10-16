@@ -20,7 +20,7 @@ class ProfileDraftPersistenceTest {
     @Test
     fun independentDraftSurvivesPrefsRoundTripModel() {
         val applied = SessionUiState.defaultProfile
-        val draft = applied.replace("My VLESS", "Draft Edge")
+        val draft = applied.replace("ViaSix Cloudflare Pages", "Draft Edge")
         val state =
             SessionUiState.fromPrefs(
                 SessionPrefs(profileYaml = applied, profileDraft = draft),

@@ -11,14 +11,14 @@ import org.json.JSONObject
  * Speed-test fields align with macOS [UserPreferences] parameters + ipSourceMode.
  */
 data class SessionPrefs(
-    val profileYaml: String = "",
+    val profileYaml: String = DefaultProfile.yaml,
     /** Nullable for migration: absent means the draft should start from [profileYaml]. */
     val profileDraft: String? = null,
     /** Last primary destination, restored after rotation and process recreation. */
     val selectedSection: String = "overview",
     /** Avoid automatically prompting for notifications on every connection after denial. */
     val notificationPermissionRequested: Boolean = false,
-    val selectedAddress: String = "2001:db8::1",
+    val selectedAddress: String = DefaultProfile.selectedAddress,
     val routingMode: String = "rule",
     val fullTunnel: Boolean = true,
     val vpnMtu: String = "1500",
@@ -117,7 +117,7 @@ data class SessionPrefs(
                         )
                     }
                 SessionPrefs(
-                    profileYaml = o.optString("profileYaml", ""),
+                    profileYaml = o.optString("profileYaml", DefaultProfile.yaml),
                     profileDraft =
                         if (o.has("profileDraft") && !o.isNull("profileDraft")) {
                             o.optString("profileDraft", "")
@@ -127,7 +127,7 @@ data class SessionPrefs(
                     selectedSection = o.optString("selectedSection", "overview"),
                     notificationPermissionRequested =
                         o.optBoolean("notificationPermissionRequested", false),
-                    selectedAddress = o.optString("selectedAddress", "2001:db8::1"),
+                    selectedAddress = o.optString("selectedAddress", DefaultProfile.selectedAddress),
                     routingMode = o.optString("routingMode", "rule"),
                     fullTunnel = o.optBoolean("fullTunnel", true),
                     vpnMtu = o.optString("vpnMtu", "1500"),
